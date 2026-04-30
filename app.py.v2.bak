@@ -1,0 +1,341 @@
+"""
+ESUM × RExharge — AI Energy Demand Forecaster (v2)
+
+Run with:  streamlit run app.py
+
+v2 changes vs v1:
+  - DirectMultiStepForecaster (no recursive error compounding)
+  - P10 / P50 / P90 quantile bands shown on chart
+  - True warm-start updates (incremental, not full retrain)
+  - Cross-validation report tab
+  - Loads extended (synthetic + real) datasets from data/synthetic/
+"""
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from pathlib import Path
+import time
+
+from src.data_loader import auto_load, load_csv, summarize
+from src.solar_estimator import estimate_solar_capacity_kwp, detect_has_solar
+from src.forecaster import DirectMultiStepForecaster, DEFAULT_HORIZONS
+from src.cv import expanding_window_cv, format_cv_report
+
+
+st.set_page_config(page_title="RExharge Load Forecaster", page_icon="⚡", layout="wide")
+
+st.markdown("""
+<style>
+.big-metric { font-size: 2.4rem; font-weight: 700; color: #00d4aa; }
+.metric-label { color: #999; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.stTabs [data-baseweb="tab-list"] { gap: 8px; }
+</style>
+""", unsafe_allow_html=True)
+
+defaults = {
+    "forecaster": None, "history": None, "last_metrics": None,
+    "forecast_result": None, "update_log": [], "cv_report": None,
+    "site_name": "Demo Site",
+}
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+# =================================================================== SIDEBAR
+with st.sidebar:
+    st.title("⚡ Setup")
+    st.session_state.site_name = st.text_input("Site name", value=st.session_state.site_name)
+
+    st.divider()
+    st.subheader("Solar PV Configuration")
+    solar_mode = st.radio(
+        "Does this site have solar?",
+        ["No solar", "Yes — I know the capacity", "Yes — please estimate it"],
+    )
+    manual_capacity = 0.0
+    if solar_mode == "Yes — I know the capacity":
+        manual_capacity = st.number_input("Installed capacity (kWp)",
+            min_value=0.0, max_value=5000.0, value=500.0, step=10.0)
+
+    st.divider()
+    st.subheader("1. Historical Data")
+    st.caption("Tip: use a CSV from `data/synthetic/` for richer training (~365 days).")
+    hist_file = st.file_uploader("Upload load profile",
+        type=["xlsx", "xls", "csv"], key="hist_uploader")
+
+    st.divider()
+    st.subheader("2. Live Update")
+    st.caption("After training, upload newer data — model warm-starts (~10s, NOT a full retrain).")
+    live_file = st.file_uploader("Upload new readings",
+        type=["xlsx", "xls", "csv"], key="live_uploader")
+
+    st.divider()
+    with st.expander("⚙️ Advanced"):
+        ws_rounds = st.slider("Warm-start rounds", 20, 200, 50, 10)
+        n_estimators = st.slider("Initial training rounds", 100, 500, 250, 50)
+
+# ================================================================== HEADER
+st.title(f"{st.session_state.site_name} — Energy Demand Forecaster")
+st.caption("Direct multi-step LightGBM with quantile bands + warm-start online learning.")
+
+col1, col2, col3, col4 = st.columns(4)
+fc = st.session_state.forecaster
+metrics = st.session_state.last_metrics
+
+with col1:
+    st.markdown('<div class="metric-label">Status</div>', unsafe_allow_html=True)
+    if fc is None:
+        st.markdown('<div class="big-metric">—</div>', unsafe_allow_html=True)
+        st.caption("Awaiting training")
+    else:
+        st.markdown('<div class="big-metric">Live</div>', unsafe_allow_html=True)
+        st.caption(f"{len(fc.boosters)} models • {fc.n_train_rows:,} samples")
+
+with col2:
+    st.markdown('<div class="metric-label">Mean MAPE</div>', unsafe_allow_html=True)
+    if metrics:
+        st.markdown(f'<div class="big-metric">{metrics["mean_mape"]:.1f}%</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="big-metric">—</div>', unsafe_allow_html=True)
+
+with col3:
+    st.markdown('<div class="metric-label">MAPE @ 24h</div>', unsafe_allow_html=True)
+    v = metrics.get("mape_at_h24") if metrics else None
+    st.markdown(f'<div class="big-metric">{v:.1f}%</div>' if v else '<div class="big-metric">—</div>',
+                unsafe_allow_html=True)
+
+with col4:
+    st.markdown('<div class="metric-label">Live Updates</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="big-metric">{len(st.session_state.update_log)}</div>', unsafe_allow_html=True)
+
+# ================================================================ TABS
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📥 Setup & Train", "📈 Live Forecast", "🧪 Cross-Validation", "🔬 Diagnostics"
+])
+
+# ----------------------------------------------------- TAB 1
+with tab1:
+    st.header("Step 1 — Train the initial model")
+    if hist_file is not None:
+        tmp = Path("data") / f"_upload_{hist_file.name}"
+        tmp.parent.mkdir(exist_ok=True)
+        tmp.write_bytes(hist_file.getvalue())
+        try:
+            df = load_csv(tmp) if tmp.suffix.lower() == ".csv" else auto_load(tmp)
+        except Exception as e:
+            st.error(f"Could not parse: {e}")
+            st.stop()
+
+        s = summarize(df)
+        st.success(f"✅ Loaded **{s['rows']:,}** samples ({s['days']} days).")
+        cA, cB, cC = st.columns(3)
+        cA.metric("Period", f"{s['start'].date()} → {s['end'].date()}")
+        cB.metric("Mean kW", f"{s['mean_kw_import']:.0f}")
+        cC.metric("Peak kW", f"{s['max_kw_import']:.0f}")
+
+        if solar_mode == "Yes — please estimate it":
+            has, why = detect_has_solar(df)
+            est = estimate_solar_capacity_kwp(df)
+            st.info(f"**Solar:** {'✅' if has else '❌'} {why} • **Estimate:** {est['capacity_kwp']:.0f} kWp")
+            capacity = est["capacity_kwp"]
+        elif solar_mode == "Yes — I know the capacity":
+            capacity = manual_capacity
+            st.info(f"Using **{capacity:.0f} kWp**")
+        else:
+            capacity = 0.0
+
+        if st.button("🚀 Train Model", type="primary", use_container_width=True):
+            t0 = time.time()
+            with st.spinner(f"Training {len(DEFAULT_HORIZONS) * 3} quantile models…"):
+                forecaster = DirectMultiStepForecaster(capacity_kwp=capacity, n_estimators=n_estimators)
+                m = forecaster.fit(df)
+                st.session_state.forecaster = forecaster
+                st.session_state.history = df
+                st.session_state.last_metrics = m
+                st.session_state.forecast_result = forecaster.forecast(output_steps=48)
+                st.session_state.update_log.append({
+                    "time": pd.Timestamp.now(), "action": "Initial fit",
+                    "added_rows": len(df), "mean_mape": m["mean_mape"],
+                    "duration_s": round(time.time() - t0, 1),
+                })
+            st.success(f"✅ Trained {m['n_models_trained']} models in {time.time()-t0:.1f}s. "
+                       f"Mean MAPE = {m['mean_mape']:.2f}%.")
+            st.rerun()
+    else:
+        st.info("⬅️ Upload a load profile in the sidebar to begin.")
+
+# ----------------------------------------------- TAB 2
+with tab2:
+    st.header("Step 2 — Forecast & Live Adaptation")
+    if fc is None:
+        st.warning("Train a model in Setup first.")
+    else:
+        if live_file is not None:
+            tmp = Path("data") / f"_live_{live_file.name}"
+            tmp.parent.mkdir(exist_ok=True)
+            tmp.write_bytes(live_file.getvalue())
+            try:
+                new_df = load_csv(tmp) if tmp.suffix.lower() == ".csv" else auto_load(tmp)
+            except Exception as e:
+                st.error(f"Could not parse: {e}")
+                st.stop()
+
+            cutoff = fc.history["timestamp"].max()
+            new_only = new_df[new_df["timestamp"] > cutoff]
+
+            if len(new_only) == 0:
+                st.warning(f"No new data (latest history: {cutoff}).")
+            else:
+                t0 = time.time()
+                with st.spinner(f"Warm-starting on {len(new_only)} new samples…"):
+                    m = fc.update(new_only, n_rounds=ws_rounds)
+                    st.session_state.last_metrics = m
+                    st.session_state.forecast_result = fc.forecast(output_steps=48)
+                    st.session_state.update_log.append({
+                        "time": pd.Timestamp.now(), "action": "Warm-start",
+                        "added_rows": len(new_only), "mean_mape": m["mean_mape"],
+                        "duration_s": round(time.time() - t0, 1),
+                    })
+                st.success(f"✅ Warm-started in {time.time()-t0:.1f}s. New MAPE = {m['mean_mape']:.2f}%.")
+
+        result = st.session_state.forecast_result
+        if result is not None:
+            hist = fc.history.tail(48 * 3)
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=hist["timestamp"], y=hist["kw_import"],
+                name="Actual", line=dict(color="#888", width=2)))
+            fig.add_trace(go.Scatter(
+                x=list(result.timestamps) + list(result.timestamps[::-1]),
+                y=list(result.p90) + list(result.p10[::-1]),
+                fill="toself", fillcolor="rgba(0,212,170,0.15)",
+                line=dict(color="rgba(0,0,0,0)"), hoverinfo="skip",
+                name="80% confidence band",
+            ))
+            fig.add_trace(go.Scatter(x=result.timestamps, y=result.median,
+                name="Forecast (median)", line=dict(color="#00d4aa", width=3)))
+            pi = int(np.argmax(result.median))
+            fig.add_trace(go.Scatter(x=[result.timestamps[pi]], y=[result.median[pi]],
+                mode="markers+text", marker=dict(color="#ff6b6b", size=14, symbol="star"),
+                text=[f"PEAK<br>{result.median[pi]:.0f} kW"], textposition="top center",
+                name="Predicted Peak"))
+            fig.update_layout(title=f"24-hour Forecast — {st.session_state.site_name}",
+                xaxis_title="Time", yaxis_title="kW Import",
+                template="plotly_dark", height=540, hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+            st.plotly_chart(fig, use_container_width=True)
+
+            peaks = fc.detect_peaks(result, top_n=3)
+            c1, c2 = st.columns([2, 1])
+            with c1:
+                st.subheader("🔥 Top 3 Predicted Peaks")
+                pp = peaks.copy()
+                pp["timestamp"] = pp["timestamp"].dt.strftime("%a %d %b, %H:%M")
+                for col in ["predicted_kw", "lower_bound_kw", "upper_bound_kw"]:
+                    pp[col] = pp[col].round(0).astype(int)
+                st.dataframe(pp, use_container_width=True, hide_index=True)
+            with c2:
+                mp = float(result.median.max())
+                st.metric("Forecast Peak", f"{mp:.0f} kW")
+                st.metric("Est. Monthly MD Charge", f"RM {mp * 97.06:,.0f}",
+                    delta=f"+RM {mp * (97.06 - 30.30):,.0f} vs old tariff",
+                    delta_color="inverse")
+
+            if len(st.session_state.update_log) > 1:
+                st.subheader("📊 Accuracy Over Time")
+                log = pd.DataFrame(st.session_state.update_log)
+                fig2 = go.Figure()
+                fig2.add_trace(go.Scatter(x=log["time"], y=log["mean_mape"],
+                    mode="lines+markers+text",
+                    text=[f"{v:.1f}%" for v in log["mean_mape"]],
+                    textposition="top center",
+                    line=dict(color="#00d4aa"), marker=dict(size=12)))
+                fig2.update_layout(yaxis_title="Mean MAPE (%)", xaxis_title="Update event",
+                    template="plotly_dark", height=320, showlegend=False)
+                st.plotly_chart(fig2, use_container_width=True)
+
+# -------------------------------------------- TAB 3
+with tab3:
+    st.header("Time-Series Cross-Validation")
+    st.markdown("Expanding-window CV with rolling forecast origins. Honest accuracy reporting.")
+    if fc is None or st.session_state.history is None:
+        st.warning("Train a model first.")
+    else:
+        cA, cB, cC = st.columns(3)
+        n_splits = cA.number_input("CV folds", 2, 8, 4)
+        min_train_days = cB.number_input("Min training days", 14, 90, 21)
+        val_block = cC.number_input("Val block (days)", 3, 14, 5)
+
+        if st.button("🧪 Run CV", type="primary"):
+            t0 = time.time()
+            with st.spinner(f"Running {n_splits}-fold CV…"):
+                report = expanding_window_cv(
+                    st.session_state.history,
+                    forecaster_factory=lambda: DirectMultiStepForecaster(
+                        capacity_kwp=fc.capacity_kwp, n_estimators=150),
+                    n_splits=int(n_splits),
+                    min_train_days=int(min_train_days),
+                    val_block_days=int(val_block),
+                    forecast_origins_per_fold=5,
+                )
+                st.session_state.cv_report = report
+            st.success(f"✅ CV done in {time.time()-t0:.1f}s")
+
+        report = st.session_state.cv_report
+        if report:
+            st.subheader("Aggregate (mean ± std across folds)")
+            rows = []
+            for h, m in sorted(report["aggregate"].items()):
+                hl = f"+{h*30}min" if h*30 < 60 else f"+{h/2:.1f}h"
+                rows.append({
+                    "Horizon": hl,
+                    "Mean MAPE": f"{m['mean_mape']:.2f}%",
+                    "± Std": f"{m['std_mape']:.2f}%",
+                    "Mean MAE": f"{m['mean_mae']:.1f} kW",
+                    "n folds": m["n_folds"],
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+            with st.expander("📋 Plain-text report (for technical report)"):
+                st.code(format_cv_report(report))
+
+# ------------------------------------------- TAB 4
+with tab4:
+    st.header("Model Diagnostics")
+    if fc is None or metrics is None:
+        st.warning("Train a model first.")
+    else:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("Per-Horizon Accuracy")
+            ph = metrics.get("per_horizon", {})
+            rows = []
+            for h, m in sorted(ph.items()):
+                hl = f"+{h*30}min" if h*30 < 60 else f"+{h/2:.1f}h"
+                rows.append({"Horizon": hl, "MAE (kW)": f"{m['mae']:.1f}",
+                    "MAPE (%)": f"{m['mape']:.2f}"})
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        with c2:
+            st.subheader("Update History")
+            if st.session_state.update_log:
+                ldf = pd.DataFrame(st.session_state.update_log)
+                ldf["time"] = ldf["time"].dt.strftime("%H:%M:%S")
+                st.dataframe(ldf, use_container_width=True, hide_index=True)
+
+        st.subheader("Save / Load Model")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("💾 Save"):
+                Path("models").mkdir(exist_ok=True)
+                p = Path("models") / f"{st.session_state.site_name.replace(' ', '_')}.joblib"
+                fc.save(p)
+                st.success(f"Saved to {p}")
+        with c2:
+            saved = list(Path("models").glob("*.joblib")) if Path("models").exists() else []
+            if saved:
+                pick = st.selectbox("Load", [str(p) for p in saved])
+                if st.button("📂 Load"):
+                    st.session_state.forecaster = DirectMultiStepForecaster.load(pick)
+                    st.session_state.forecast_result = st.session_state.forecaster.forecast(48)
+                    st.success(f"Loaded {pick}")
+                    st.rerun()
