@@ -1,734 +1,649 @@
 """
-ESUM x RExharge - AI Energy Demand Forecaster (v3)
-
-v3 adds: Live Simulation tab with auto-replay of future data, live
-forecast-vs-actual tracking, running accuracy metrics, and periodic
-warm-start retrains.
+AI Energy Manager - Backend Server (v4)
+Battery rules:
+  DISCHARGE when ALL hold:
+    - kva_original >= 80% of day_peak  (in the peak zone)
+    - kva_after_loads >= target_peak   (85% of day_peak)
+    - SOC > 15% of capacity            (discharge floor)
+    - Discharge capped to exact gap needed, 0.5C rate, and available SOC
+  CHARGE when:
+    - Not discharging this interval
+    - SOC < bat_max
+    - Charge would not push kva above 92% of discharge_trigger (peak-creation guard)
+    - A) Emergency: SOC < 15%  → charge regardless of kva level
+    - B) Normal   : kva < charge_upper_pct (70%) of day_peak AND SOC < 90%
+    - Charge capped to 0.5C rate and kva ceiling headroom
+  Priority: battery discharge FIRST, then load reduction
 """
-import streamlit as st
+
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-from pathlib import Path
-import time
+import math, os, traceback, re
+from io import StringIO
 
-from src.data_loader import auto_load, load_csv, summarize
-from src.solar_estimator import estimate_solar_capacity_kwp, detect_has_solar
-from src.forecaster import DirectMultiStepForecaster, DEFAULT_HORIZONS
-from src.cv import expanding_window_cv, format_cv_report
-from src.simulation import (
-    initialize_simulation,
-    advance_one_tick,
-    compute_running_accuracy,
-    build_forecast_vs_actual_df,
-    split_historical_for_simulation,
-)
+app = Flask(__name__, static_folder='static')
+CORS(app)
 
+# ── helpers ──────────────────────────────────────────────────────────────────
+def calc_kva(kw_net, kvar_net):
+    return math.sqrt(kw_net**2 + kvar_net**2)
 
-st.set_page_config(page_title="RExharge Load Forecaster", page_icon="⚡", layout="wide")
+def _normalize_cols(df):
+    df.columns = (df.columns.astype(str).str.strip().str.lower()
+                  .str.replace('\ufeff','',regex=False)
+                  .str.replace(r'\s+',' ',regex=True))
+    return df
 
-st.markdown("""
-<style>
-.big-metric { font-size: 2.4rem; font-weight: 700; color: #00d4aa; }
-.metric-label { color: #999; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; }
-.stTabs [data-baseweb="tab-list"] { gap: 8px; }
-.live-indicator {
-    display: inline-block;
-    width: 12px; height: 12px;
-    background: #ff4444;
-    border-radius: 50%;
-    margin-right: 6px;
-    animation: pulse 1.5s infinite;
-}
-@keyframes pulse {
-    0% { opacity: 1; }
-    50% { opacity: 0.3; }
-    100% { opacity: 1; }
-}
-</style>
-""", unsafe_allow_html=True)
+def _is_valid_header_row(cols):
+    col_str = ' '.join(cols)
+    has_time  = any(t in col_str for t in ('date','time','start','end','timestamp','datetime'))
+    has_power = any(t in col_str for t in ('kw','kvar','kwh','power','watt','energy','var'))
+    return has_time and has_power
 
-defaults = {
-    "forecaster": None, "history": None, "last_metrics": None,
-    "forecast_result": None, "update_log": [], "cv_report": None,
-    "site_name": "Demo Site",
-    "sim_state": None, "sim_running": False,
-    "sim_tick_interval_s": 1.0, "sim_last_advance_time": 0.0,
-    "sim_future_data": None,
-}
-for k, v in defaults.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
-
-# =================================================================== SIDEBAR
-with st.sidebar:
-    st.title("⚡ Setup")
-    st.session_state.site_name = st.text_input("Site name", value=st.session_state.site_name)
-
-    st.divider()
-    st.subheader("Solar PV Configuration")
-    solar_mode = st.radio(
-        "Does this site have solar?",
-        ["No solar", "Yes — I know the capacity", "Yes — please estimate it"],
-    )
-    manual_capacity = 0.0
-    if solar_mode == "Yes — I know the capacity":
-        manual_capacity = st.number_input("Installed capacity (kWp)",
-            min_value=0.0, max_value=5000.0, value=500.0, step=10.0)
-
-    st.divider()
-    st.subheader("1. Historical Data")
-    st.caption("Tip: use a CSV from `data/synthetic/` for richer training.")
-    hist_file = st.file_uploader("Upload load profile",
-        type=["xlsx", "xls", "csv"], key="hist_uploader")
-
-    st.divider()
-    st.subheader("2. Live Update (one-shot)")
-    st.caption("Batch upload newer data. For auto-replay, use Live Simulation tab.")
-    live_file = st.file_uploader("Upload new readings",
-        type=["xlsx", "xls", "csv"], key="live_uploader")
-
-    st.divider()
-    with st.expander("⚙️ Advanced"):
-        ws_rounds = st.slider("Warm-start rounds", 20, 200, 50, 10)
-        n_estimators = st.slider("Initial training rounds", 100, 500, 250, 50)
-
-# ================================================================== HEADER
-st.title(f"{st.session_state.site_name} — Energy Demand Forecaster")
-st.caption("Direct multi-step LightGBM with quantile bands + live-adapting online learning.")
-
-col1, col2, col3, col4 = st.columns(4)
-fc = st.session_state.forecaster
-metrics = st.session_state.last_metrics
-
-with col1:
-    st.markdown('<div class="metric-label">Status</div>', unsafe_allow_html=True)
-    if fc is None:
-        st.markdown('<div class="big-metric">—</div>', unsafe_allow_html=True)
-        st.caption("Awaiting training")
-    else:
-        st.markdown(f'<div class="big-metric">Live</div>', unsafe_allow_html=True)
-        st.caption(f"{len(fc.boosters)} models • {fc.n_train_rows:,} samples")
-
-with col2:
-    st.markdown('<div class="metric-label">Mean MAPE</div>', unsafe_allow_html=True)
-    if metrics:
-        st.markdown(f'<div class="big-metric">{metrics["mean_mape"]:.1f}%</div>', unsafe_allow_html=True)
-    else:
-        st.markdown('<div class="big-metric">—</div>', unsafe_allow_html=True)
-
-with col3:
-    st.markdown('<div class="metric-label">MAPE @ 24h</div>', unsafe_allow_html=True)
-    v = metrics.get("mape_at_h24") if metrics else None
-    st.markdown(f'<div class="big-metric">{v:.1f}%</div>' if v else '<div class="big-metric">—</div>',
-                unsafe_allow_html=True)
-
-with col4:
-    st.markdown('<div class="metric-label">Updates</div>', unsafe_allow_html=True)
-    total = len(st.session_state.update_log)
-    if st.session_state.sim_state is not None:
-        total += len(st.session_state.sim_state.retrain_log)
-    st.markdown(f'<div class="big-metric">{total}</div>', unsafe_allow_html=True)
-
-# ================================================================ TABS
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📥 Setup & Train", "📈 Live Forecast",
-    "🎬 Live Simulation", "🧪 Cross-Validation", "🔬 Diagnostics"
-])
-
-# ======================================================= TAB 1: SETUP
-with tab1:
-    st.header("Step 1 — Train the initial model")
-    if hist_file is not None:
-        tmp = Path("data") / f"_upload_{hist_file.name}"
-        tmp.parent.mkdir(exist_ok=True)
-        tmp.write_bytes(hist_file.getvalue())
+def _find_datetime_col(df):
+    cols = list(df.columns)
+    for col in cols:
+        if ('date' in col and 'time' in col) or 'datetime' in col or 'timestamp' in col:
+            df[col] = pd.to_datetime(df[col], errors='coerce')
+            return col, df
+    for col in cols:
+        if col in ('end_time','end time'):
+            df[col] = pd.to_datetime(df[col], errors='coerce')
+            return col, df
+    for col in cols:
+        if col in ('start_time','start time'):
+            df[col] = pd.to_datetime(df[col], errors='coerce')
+            return col, df
+    date_col = next((c for c in cols if c == 'date' or c.startswith('date')), None)
+    time_col = next((c for c in cols if c in ('time','end time','end_time','start_time') and c != date_col), None)
+    if date_col and time_col:
+        combined = pd.to_datetime(df[date_col].astype(str)+' '+df[time_col].astype(str), errors='coerce')
+        df['_dt'] = combined
+        return '_dt', df
+    for col in cols[:10]:
         try:
-            df = load_csv(tmp) if tmp.suffix.lower() == ".csv" else auto_load(tmp)
-        except Exception as e:
-            st.error(f"Could not parse: {e}")
-            st.stop()
+            parsed = pd.to_datetime(df[col], errors='coerce')
+            if parsed.notna().sum() / max(len(parsed),1) >= 0.8:
+                df[col] = parsed
+                return col, df
+        except Exception:
+            continue
+    raise ValueError(f"No date/time column found. Columns: {cols}")
 
-        s = summarize(df)
-        st.success(f"✅ Loaded **{s['rows']:,}** samples ({s['days']} days).")
-        cA, cB, cC = st.columns(3)
-        cA.metric("Period", f"{s['start'].date()} → {s['end'].date()}")
-        cB.metric("Mean kW", f"{s['mean_kw_import']:.0f}")
-        cC.metric("Peak kW", f"{s['max_kw_import']:.0f}")
+def _map_power_cols(df):
+    col_map = {}
+    for col in df.columns:
+        is_kvar = 'kvar' in col or ('var' in col and 'kw' not in col)
+        is_kw   = ('kw' in col or 'kwh' in col or 'watt' in col or 'active' in col
+                   or 'power' in col or 'energy' in col) and not is_kvar
+        is_import = 'import' in col
+        is_export = 'export' in col
+        if is_kvar and is_import and 'kvar_import' not in col_map:   col_map['kvar_import'] = col
+        elif is_kvar and is_export and 'kvar_export' not in col_map: col_map['kvar_export'] = col
+        elif is_kw   and is_import and 'kw_import'   not in col_map: col_map['kw_import']   = col
+        elif is_kw   and is_export and 'kw_export'   not in col_map: col_map['kw_export']   = col
+    for key in ('kw_import','kw_export','kvar_import','kvar_export'):
+        col_map.setdefault(key, None)
+    return col_map
 
-        if solar_mode == "Yes — please estimate it":
-            has, why = detect_has_solar(df)
-            est = estimate_solar_capacity_kwp(df)
-            st.info(f"**Solar:** {'✅' if has else '❌'} {why} • **Estimate:** {est['capacity_kwp']:.0f} kWp")
-            capacity = est["capacity_kwp"]
-        elif solar_mode == "Yes — I know the capacity":
-            capacity = manual_capacity
-            st.info(f"Using **{capacity:.0f} kWp**")
-        else:
-            capacity = 0.0
-
-        st.divider()
-        st.subheader("Reserve data for Live Simulation (recommended)")
-        reserve_sim = st.checkbox(
-            "Split this dataset — train on past, simulate on future",
-            value=True,
-        )
-        train_frac = 0.7
-        if reserve_sim:
-            train_frac = st.slider("Fraction for training", 0.3, 0.95, 0.7, 0.05)
-            pt, pf = split_historical_for_simulation(df, train_fraction=train_frac)
-            cA, cB = st.columns(2)
-            cA.metric("Training rows", f"{len(pt):,}")
-            cB.metric("Simulation rows", f"{len(pf):,}")
-            st.caption(
-                f"Train cutoff: {pt['timestamp'].max()}  →  "
-                f"Sim starts: {pf['timestamp'].min()}"
-            )
-
-        if st.button("🚀 Train Model", type="primary", use_container_width=True):
-            if reserve_sim:
-                training_df, future_df = split_historical_for_simulation(df, train_fraction=train_frac)
-                st.session_state.sim_future_data = future_df
-            else:
-                training_df = df
-                st.session_state.sim_future_data = None
-
-            t0 = time.time()
-            with st.spinner(f"Training {len(DEFAULT_HORIZONS) * 3} quantile models…"):
-                forecaster = DirectMultiStepForecaster(capacity_kwp=capacity, n_estimators=n_estimators)
-                m = forecaster.fit(training_df)
-                st.session_state.forecaster = forecaster
-                st.session_state.history = training_df
-                st.session_state.last_metrics = m
-                st.session_state.forecast_result = forecaster.forecast(output_steps=48)
-                st.session_state.update_log.append({
-                    "time": pd.Timestamp.now(), "action": "Initial fit",
-                    "added_rows": len(training_df), "mean_mape": m["mean_mape"],
-                    "duration_s": round(time.time() - t0, 1),
-                })
-            st.session_state.sim_state = None
-            st.session_state.sim_running = False
-
-            msg = f"✅ Trained {m['n_models_trained']} models in {time.time()-t0:.1f}s. Mean MAPE = {m['mean_mape']:.2f}%."
-            if reserve_sim:
-                msg += f" {len(future_df):,} rows reserved for Live Simulation."
-            st.success(msg)
-            st.rerun()
-    else:
-        st.info("⬅️ Upload a load profile in the sidebar to begin.")
-
-# ======================================================= TAB 2: LIVE FORECAST
-with tab2:
-    st.header("Step 2 — Forecast & Live Adaptation (batch)")
-    if fc is None:
-        st.warning("Train a model in Setup first.")
-    else:
-        if live_file is not None:
-            tmp = Path("data") / f"_live_{live_file.name}"
-            tmp.parent.mkdir(exist_ok=True)
-            tmp.write_bytes(live_file.getvalue())
-            try:
-                new_df = load_csv(tmp) if tmp.suffix.lower() == ".csv" else auto_load(tmp)
-            except Exception as e:
-                st.error(f"Could not parse: {e}")
-                st.stop()
-
-            cutoff = fc.history["timestamp"].max()
-            new_only = new_df[new_df["timestamp"] > cutoff]
-
-            if len(new_only) == 0:
-                st.warning(f"No new data (latest history: {cutoff}).")
-            else:
-                t0 = time.time()
-                with st.spinner(f"Warm-starting on {len(new_only)} new samples…"):
-                    m = fc.update(new_only, n_rounds=ws_rounds)
-                    st.session_state.last_metrics = m
-                    st.session_state.forecast_result = fc.forecast(output_steps=48)
-                    st.session_state.update_log.append({
-                        "time": pd.Timestamp.now(), "action": "Warm-start",
-                        "added_rows": len(new_only), "mean_mape": m["mean_mape"],
-                        "duration_s": round(time.time() - t0, 1),
-                    })
-                st.success(f"✅ Warm-started in {time.time()-t0:.1f}s. New MAPE = {m['mean_mape']:.2f}%.")
-
-        result = st.session_state.forecast_result
-        if result is not None:
-            hist = fc.history.tail(48 * 3)
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=hist["timestamp"], y=hist["kw_import"],
-                name="Actual", line=dict(color="#888", width=2)))
-            fig.add_trace(go.Scatter(
-                x=list(result.timestamps) + list(result.timestamps[::-1]),
-                y=list(result.p90) + list(result.p10[::-1]),
-                fill="toself", fillcolor="rgba(0,212,170,0.15)",
-                line=dict(color="rgba(0,0,0,0)"), hoverinfo="skip",
-                name="80% confidence band",
-            ))
-            fig.add_trace(go.Scatter(x=result.timestamps, y=result.median,
-                name="Forecast (median)", line=dict(color="#00d4aa", width=3)))
-            pi = int(np.argmax(result.median))
-            fig.add_trace(go.Scatter(x=[result.timestamps[pi]], y=[result.median[pi]],
-                mode="markers+text", marker=dict(color="#ff6b6b", size=14, symbol="star"),
-                text=[f"PEAK<br>{result.median[pi]:.0f} kW"], textposition="top center",
-                name="Predicted Peak"))
-            fig.update_layout(title=f"24-hour Forecast — {st.session_state.site_name}",
-                xaxis_title="Time", yaxis_title="kW Import",
-                template="plotly_dark", height=540, hovermode="x unified",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
-            st.plotly_chart(fig, use_container_width=True)
-
-            peaks = fc.detect_peaks(result, top_n=3)
-            c1, c2 = st.columns([2, 1])
-            with c1:
-                st.subheader("🔥 Top 3 Predicted Peaks")
-                pp = peaks.copy()
-                pp["timestamp"] = pp["timestamp"].dt.strftime("%a %d %b, %H:%M")
-                for col in ["predicted_kw", "lower_bound_kw", "upper_bound_kw"]:
-                    pp[col] = pp[col].round(0).astype(int)
-                st.dataframe(pp, use_container_width=True, hide_index=True)
-            with c2:
-                mp = float(result.median.max())
-                st.metric("Forecast Peak", f"{mp:.0f} kW")
-                st.metric("Est. Monthly MD Charge", f"RM {mp * 97.06:,.0f}",
-                    delta=f"+RM {mp * (97.06 - 30.30):,.0f} vs old tariff",
-                    delta_color="inverse")
-
-# ======================================================= TAB 3: LIVE SIMULATION
-with tab3:
-    st.header("🎬 Live Data Simulation")
-    st.caption(
-        "Auto-replays 'future' readings one at a time, comparing forecasts against actuals "
-        "live, with periodic warm-start retrains."
-    )
-
-    if fc is None:
-        st.warning("Train a model in Setup first.")
-    else:
-        sim_state = st.session_state.sim_state
-
-        # ---------------- CONFIGURATION PANEL ----------------
-        if sim_state is None:
-            st.subheader("Configure Simulation")
-
-            # --- Data source selection ---
-            # Always let the user upload a separate test file (e.g. April 2022 data
-            # when the model was trained on March 2021–2022). Uploading overrides
-            # whatever was reserved during training.
-            future_df = st.session_state.sim_future_data
-
-            sim_upload = st.file_uploader(
-                "Upload separate test dataset (optional — overrides any reserved split)",
-                type=["xlsx", "xls", "csv"], key="sim_upload",
-                help="Upload data the model has never seen, e.g. April 2022 if you "
-                     "trained on March 2021–2022. All rows in the file are used as-is.",
-            )
-            if sim_upload is not None:
-                tmp = Path("data") / f"_sim_{sim_upload.name}"
-                tmp.parent.mkdir(exist_ok=True)
-                tmp.write_bytes(sim_upload.getvalue())
+# ── data parsing (unchanged from v2) ─────────────────────────────────────────
+def parse_uploaded_data(file_content, filename):
+    try:
+        df = None
+        if filename.lower().endswith('.csv'):
+            encodings = ['utf-8-sig','utf-8','latin-1','cp1252']
+            for hrow in range(12):
+                for enc in encodings:
+                    try:
+                        tmp = pd.read_csv(StringIO(file_content.decode(enc)), header=hrow)
+                        tmp = _normalize_cols(tmp)
+                        if len(tmp.columns) >= 4 and _is_valid_header_row(list(tmp.columns)):
+                            df = tmp; break
+                    except Exception: continue
+                if df is not None: break
+            if df is None: raise ValueError("Could not locate a valid header row in CSV.")
+        elif filename.lower().endswith(('.xlsx','.xls')):
+            import io
+            engine = 'xlrd' if filename.lower().endswith('.xls') else 'openpyxl'
+            fb = io.BytesIO(file_content)
+            for hrow in range(12):
                 try:
-                    fd = load_csv(tmp) if tmp.suffix.lower() == ".csv" else auto_load(tmp)
-                    fd = fd.sort_values("timestamp").reset_index(drop=True)
-
-                    # Diagnostic: catch the silent-zero problem immediately
-                    if fd["kw_import"].max() == 0:
-                        # Peek at raw column names to help the user diagnose
-                        try:
-                            if tmp.suffix.lower() == ".csv":
-                                import csv as _csv
-                                raw_cols = next(_csv.reader(open(tmp, encoding="utf-8-sig")))
-                            else:
-                                raw_cols = list(pd.read_excel(tmp, header=None, nrows=3).iloc[0].astype(str))
-                        except Exception:
-                            raw_cols = ["(could not read raw columns)"]
-                        st.error(
-                            "❌ `kw_import` is all zeros — the file loaded but the power "
-                            "column wasn't recognised.\n\n"
-                            f"**Raw column names found:** `{raw_cols}`\n\n"
-                            "The loader expects a column whose name contains **'kW Import'** "
-                            "(or equivalent after lowercasing). If your file uses a different "
-                            "name, rename it to `kw_import` before uploading."
-                        )
-                        future_df = None
-                    else:
-                        # Warn about overlap with training data (informational only)
-                        cutoff = fc.history["timestamp"].max()
-                        overlap_n = int((fd["timestamp"] <= cutoff).sum())
-                        if overlap_n > 0:
-                            st.warning(
-                                f"⚠️ {overlap_n} rows overlap with training data "
-                                f"(before {cutoff.date()}). The model already saw these — "
-                                "consider uploading only truly unseen data for a fair test."
-                            )
-                        future_df = fd
-                        st.success(
-                            f"✅ Loaded **{len(future_df):,}** rows "
-                            f"({future_df['timestamp'].min().date()} → "
-                            f"{future_df['timestamp'].max().date()}) — "
-                            f"kW import range: {future_df['kw_import'].min():.0f}–"
-                            f"{future_df['kw_import'].max():.0f} kW."
-                        )
-                        with st.expander("🔍 Data preview (first 5 rows)"):
-                            st.dataframe(future_df.head(5), use_container_width=True)
-                except Exception as e:
-                    st.error(f"Could not parse: {e}")
-                    future_df = None
-            elif future_df is not None:
-                st.success(
-                    f"✅ Using **{len(future_df):,}** rows reserved during training "
-                    f"({future_df['timestamp'].min().date()} → "
-                    f"{future_df['timestamp'].max().date()})."
-                )
-            else:
-                st.info(
-                    "No simulation data yet. Either upload a test file above, "
-                    "or go back to Setup and train with 'Split this dataset' checked."
-                )
-
-            if future_df is not None and len(future_df) > 0:
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    sim_speed = st.select_slider(
-                        "Playback speed",
-                        options=["0.3s (fast)", "0.6s", "1.0s (normal)", "2.0s", "3.0s (slow)"],
-                        value="1.0s (normal)",
-                    )
-                    sim_interval = float(sim_speed.split("s")[0])
-                with c2:
-                    retrain_every = st.number_input("Retrain every N readings",
-                        min_value=2, max_value=96, value=6, step=2,
-                        help="6 = every 3 hours of simulated time (more frequent = faster adaptation)")
-                with c3:
-                    sim_ws_rounds = st.number_input("Warm-start rounds",
-                        min_value=10, max_value=200, value=50, step=10,
-                        help="Extra boosting rounds per retrain. Higher = stronger adaptation.")
-
-                max_ticks = st.slider("Max simulation length (readings)",
-                    min_value=48, max_value=min(len(future_df), 2016),
-                    value=min(len(future_df), 336),  # default 1 week
-                    step=48,
-                    help="48 = 1 day, 336 = 1 week, 2016 = 6 weeks")
-
-                if st.button("▶️ Initialize Simulation", type="primary", use_container_width=True):
-                    subset = future_df.iloc[:max_ticks].copy()
-                    st.session_state.sim_state = initialize_simulation(
-                        forecaster=fc, future_data=subset,
-                        retrain_every_n=int(retrain_every),
-                        tick_interval_s=sim_interval,
-                        warm_start_rounds=int(sim_ws_rounds),
-                    )
-                    st.session_state.sim_tick_interval_s = sim_interval
-                    st.session_state.sim_running = False
-                    st.session_state.sim_last_advance_time = 0.0
-                    st.rerun()
-
-        # ---------------- RUNNING SIMULATION ----------------
+                    fb.seek(0)
+                    tmp = pd.read_excel(fb, header=hrow, engine=engine)
+                    tmp = _normalize_cols(tmp)
+                    if len(tmp.columns) >= 4 and _is_valid_header_row(list(tmp.columns)):
+                        df = tmp; break
+                except Exception: continue
+            if df is None: raise ValueError("Could not locate a valid header row in Excel.")
         else:
-            is_finished = sim_state.is_finished
-            is_running = st.session_state.sim_running
+            raise ValueError(f"Unsupported format '{filename}'. Use CSV or Excel.")
 
-            # Control bar
-            ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([1, 1, 1, 3])
-            with ctrl1:
-                play_label = "⏸️ Pause" if is_running else "▶️ Play"
-                if st.button(play_label, use_container_width=True, disabled=is_finished):
-                    st.session_state.sim_running = not is_running
-                    st.session_state.sim_last_advance_time = time.time()
-                    st.rerun()
-            with ctrl2:
-                if st.button("⏭️ Step", use_container_width=True,
-                             disabled=(is_running or is_finished)):
-                    advance_one_tick(fc, sim_state)
-                    st.rerun()
-            with ctrl3:
-                if st.button("🔁 Reset", use_container_width=True):
-                    st.session_state.sim_state = None
-                    st.session_state.sim_running = False
-                    st.rerun()
-            with ctrl4:
-                if is_finished:
-                    st.markdown("✅ **Simulation finished**")
-                elif is_running:
-                    st.markdown('<span class="live-indicator"></span>**LIVE**',
-                        unsafe_allow_html=True)
-                else:
-                    st.markdown("⏸️ Paused")
+        df = df.dropna(how='all').reset_index(drop=True)
+        df = df.loc[:, df.columns.notna()]
+        df = df.loc[:, df.columns.astype(str) != '']
 
-            # Progress
-            st.progress(sim_state.progress,
-                text=f"Tick {sim_state.tick} / {sim_state.total_ticks}  "
-                     f"({sim_state.progress*100:.1f}%)")
+        start_col, df = _find_datetime_col(df)
+        df = df.dropna(subset=[start_col]).reset_index(drop=True)
+        df = df.sort_values(start_col).reset_index(drop=True)
 
-            # Live metrics
-            acc = compute_running_accuracy(sim_state)
-            m1, m2, m3, m4, m5 = st.columns(5)
+        col_map = _map_power_cols(df)
+        def _s(key):
+            col = col_map.get(key)
+            if col and col in df.columns:
+                return pd.to_numeric(df[col], errors='coerce').fillna(0)
+            return pd.Series([0.0]*len(df), index=df.index)
 
-            with m1:
-                st.markdown('<div class="metric-label">Simulated time</div>', unsafe_allow_html=True)
-                revealed = sim_state.revealed_data()
-                if len(revealed) > 0:
-                    cur_ts = revealed["timestamp"].iloc[-1]
-                    st.markdown(f'<div class="big-metric" style="font-size: 1.4rem;">'
-                                f'{cur_ts.strftime("%a %H:%M")}</div>', unsafe_allow_html=True)
-                    st.caption(cur_ts.strftime("%d %b %Y"))
-                else:
-                    st.markdown('<div class="big-metric">—</div>', unsafe_allow_html=True)
+        result = pd.DataFrame()
+        result['timestamp']   = df[start_col].values
+        result['kw_import']   = _s('kw_import').values
+        result['kw_export']   = _s('kw_export').values
+        result['kvar_import'] = _s('kvar_import').values
+        result['kvar_export'] = _s('kvar_export').values
+        result['kw_net']   = result['kw_import']   - result['kw_export']
+        result['kvar_net'] = result['kvar_import'] - result['kvar_export']
+        result['kva']      = result.apply(lambda r: calc_kva(r['kw_net'],r['kvar_net']), axis=1)
 
-            with m2:
-                st.markdown('<div class="metric-label">Live MAPE</div>', unsafe_allow_html=True)
-                if acc["overall_mape"] is not None:
-                    st.markdown(f'<div class="big-metric">{acc["overall_mape"]:.1f}%</div>',
-                        unsafe_allow_html=True)
-                    st.caption(f"{acc['n_verified']} verified")
-                else:
-                    st.markdown('<div class="big-metric">—</div>', unsafe_allow_html=True)
+        result['timestamp'] = pd.to_datetime(result['timestamp'])
+        result = result.set_index('timestamp').resample('30min').mean().dropna(how='all').reset_index()
+        result['kva'] = result.apply(lambda r: calc_kva(r['kw_net'],r['kvar_net']), axis=1)
+        if result.empty: raise ValueError("Empty after resampling.")
+        return result
+    except Exception as e:
+        raise ValueError(f"Data parsing error: {str(e)}")
 
-            with m3:
-                st.markdown('<div class="metric-label">Live MAE</div>', unsafe_allow_html=True)
-                if acc["overall_mae"] is not None:
-                    st.markdown(f'<div class="big-metric">{acc["overall_mae"]:.0f} kW</div>',
-                        unsafe_allow_html=True)
-                else:
-                    st.markdown('<div class="big-metric">—</div>', unsafe_allow_html=True)
 
-            with m4:
-                st.markdown('<div class="metric-label">In 80% CI</div>', unsafe_allow_html=True)
-                if acc["within_80ci_pct"] is not None:
-                    color = "#00d4aa" if acc["within_80ci_pct"] >= 70 else "#ff9a3c"
-                    st.markdown(f'<div class="big-metric" style="color: {color};">'
-                                f'{acc["within_80ci_pct"]:.0f}%</div>', unsafe_allow_html=True)
-                    st.caption("target: ~80%")
-                else:
-                    st.markdown('<div class="big-metric">—</div>', unsafe_allow_html=True)
+# ── AI MANAGER v4 ─────────────────────────────────────────────────────────────
+def run_ai_manager(df, proportions, battery_capacity_kwh, priority_order,
+                   peak_target_pct, max_cut_pct, bat_charge_upper_pct,
+                   bat_charge_lower_pct, c_rate=0.5, initial_soc_pct=0.50,
+                   peak_reference_kva=None, lookahead_intervals=3):
+    """
+    Per-day 24h optimisation  (v4 — corrected charge/discharge guards).
 
-            with m5:
-                st.markdown('<div class="metric-label">Bias correction</div>', unsafe_allow_html=True)
-                bias = getattr(sim_state, "current_bias", 0.0)
-                if bias != 0.0:
-                    sign = "+" if bias > 0 else ""
-                    color = "#00d4aa" if abs(bias) < 50 else "#ff9a3c"
-                    st.markdown(f'<div class="big-metric" style="color:{color};">'
-                                f'{sign}{bias:.0f} kW</div>', unsafe_allow_html=True)
-                    st.caption(f"{len(sim_state.retrain_log)} retrains")
-                else:
-                    st.markdown('<div class="big-metric">—</div>', unsafe_allow_html=True)
-                    st.caption(f"{len(sim_state.retrain_log)} retrains")
+    FIX 1  — kW/kVAR correctly tracked: battery dispatch and load cuts both
+             decompose into kW and kVAR components; kVA is always recomputed
+             as √(kW²+kVAR²) rather than linearly decremented.
+    FIX 2  — SOC carries over between days; only initialised once at the
+             start of the full dataset using initial_soc_pct.
+    FIX 3  — Peak reference is a 30-day rolling maximum of prior days (or a
+             user-supplied absolute ceiling) — not the current day's own peak.
+    FIX 4  — Look-ahead: if any of the next `lookahead_intervals` intervals
+             are flagged high-load, the battery starts discharging early.
+    FIX 5  — C-rate is a configurable parameter (default 0.5C).
+    FIX 6  — Per-interval kVAh cut computed for each load type and aggregated.
+    FIX 7  — Emergency charging uses a separate 100%-of-target ceiling so a
+             critically low battery can always recover.
 
-            # ---------------- MAIN CHART ----------------
-            st.subheader("📈 Forecast vs Actual (live)")
-            revealed = sim_state.revealed_data()
-            cur_fc = sim_state.current_forecast
+    ── DISCHARGE rules (ALL must hold) ────────────────────────────────────────
+      1. kva_orig ≥ DISCHARGE_PROXIMITY_PCT (80%) of reference peak,
+         OR any of the next `lookahead_intervals` intervals are high-load.
+      2. managed kVA ≥ discharge_trigger (peak_target_pct of reference peak).
+      3. SOC > BAT_DISCHARGE_MIN_PCT (15%) floor.
+      Discharge kW is decomposed along the active-power axis (same power
+      factor), then kVA is recomputed.
 
-            # ---- 48-hour paging (96 ticks at 30-min resolution) ----
-            TICKS_PER_WINDOW = 96
-            page = sim_state.tick // TICKS_PER_WINDOW
-            window_start_tick = page * TICKS_PER_WINDOW
-            sim_ts_series = sim_state.future_data["timestamp"]
-            window_start_ts = sim_ts_series.iloc[min(window_start_tick, len(sim_ts_series) - 1)]
-            window_end_ts = window_start_ts + pd.Timedelta(hours=48)
+    ── CHARGE rules ────────────────────────────────────────────────────────────
+      A) Emergency (SOC < 15%): ceiling = 100% of discharge_trigger.
+      B) Normal (kva < charge_upper AND SOC < 90%): ceiling = 92% of trigger.
+      Charge power adds to kW, then kVA is recomputed.
+      Never charge and discharge in the same interval.
+    """
+    results    = []
+    INTERVAL_H = 0.5   # 30-minute intervals
 
-            fig = go.Figure()
+    # ── tuneable constants ───────────────────────────────────────────────────
+    BAT_EMERGENCY_PCT        = 0.15   # SOC below this → emergency charge
+    BAT_CHARGE_FULL_PCT      = 0.90   # SOC ceiling for normal charging
+    BAT_DISCHARGE_MIN_PCT    = 0.15   # SOC floor — never discharge below this
+    DISCHARGE_PROXIMITY_PCT  = 0.80   # kva must be ≥ 80% of reference peak to discharge
+    CHARGE_PEAK_GUARD_PCT    = 0.92   # charging must not push kva above 92% of target
+    EMERGENCY_PEAK_GUARD_PCT = 1.00   # emergency charging allowed up to 100% of target
 
-            # Training history context — only on page 0 (before simulation data begins)
-            sim_first_ts = sim_state.future_data["timestamp"].iloc[0]
-            if page == 0:
-                train_tail = fc.history[fc.history["timestamp"] < sim_first_ts].tail(96)
-                if len(train_tail) > 0:
-                    fig.add_trace(go.Scatter(
-                        x=train_tail["timestamp"], y=train_tail["kw_import"],
-                        name="Training history",
-                        line=dict(color="#555", width=1.5),
-                    ))
+    # normalise proportions
+    ev_p   = proportions.get('ev',   0.3)
+    hvac_p = proportions.get('hvac', 0.4)
+    misc_p = proportions.get('misc', 0.3)
+    tot = ev_p + hvac_p + misc_p or 1
+    ev_p /= tot; hvac_p /= tot; misc_p /= tot
 
-            # Revealed actuals — current window only
-            # Include a 2-hour overlap buffer on non-first pages so the line
-            # doesn't start abruptly at the left edge.
-            buf = pd.Timedelta(hours=2) if page > 0 else pd.Timedelta(0)
-            revealed_window = revealed[revealed["timestamp"] >= (window_start_ts - buf)]
-            if len(revealed_window) > 0:
-                fig.add_trace(go.Scatter(
-                    x=revealed_window["timestamp"], y=revealed_window["kw_import"],
-                    name="Actual (live)",
-                    line=dict(color="#00d4aa", width=3),
-                    mode="lines+markers", marker=dict(size=5),
-                ))
+    df = df.copy()
+    df['date'] = df['timestamp'].dt.date
 
-            # Current forecast
-            if cur_fc is not None:
-                fig.add_trace(go.Scatter(
-                    x=list(cur_fc.timestamps) + list(cur_fc.timestamps[::-1]),
-                    y=list(cur_fc.p90) + list(cur_fc.p10[::-1]),
-                    fill="toself", fillcolor="rgba(255,154,60,0.15)",
-                    line=dict(color="rgba(0,0,0,0)"), hoverinfo="skip",
-                    name="80% CI (forecast)",
-                ))
-                fig.add_trace(go.Scatter(
-                    x=cur_fc.timestamps, y=cur_fc.median,
-                    name="Forecast",
-                    line=dict(color="#ff9a3c", width=2.5, dash="dot"),
-                ))
+    # FIX 2: SOC carries across days — initialise once here, not per-day.
+    bat_max     = battery_capacity_kwh
+    bat_min_abs = battery_capacity_kwh * 0.05
+    bat_emergency_abs = battery_capacity_kwh * BAT_EMERGENCY_PCT
+    bat_full    = battery_capacity_kwh * BAT_CHARGE_FULL_PCT
+    bat_dis_min = battery_capacity_kwh * BAT_DISCHARGE_MIN_PCT
+    # FIX 5: C-rate is now a user-configurable parameter (default 0.5C).
+    chg_rate_kw = battery_capacity_kwh * c_rate
+    dis_rate_kw = battery_capacity_kwh * c_rate
+    bat_soc     = battery_capacity_kwh * initial_soc_pct   # only set once at the very start
 
-            # Retrain markers — only those within the current window
-            for rt in sim_state.retrain_log:
-                x_val = rt["reveal_ts"]
-                if not (window_start_ts - buf <= x_val <= window_end_ts):
-                    continue
-                fig.add_shape(
-                    type="line", x0=x_val, x1=x_val, y0=0, y1=1,
-                    xref="x", yref="paper",
-                    line=dict(width=1, dash="dot", color="rgba(255,255,255,0.25)"),
-                )
-                fig.add_annotation(
-                    x=x_val, y=1.02, xref="x", yref="paper",
-                    text="🔄", showarrow=False, font=dict(size=11),
-                )
+    # FIX 3: Build a rolling 30-day peak reference per calendar day so the
+    # optimizer does not "know" the day's own maximum before it acts.
+    # If the caller supplies an absolute ceiling, use that instead.
+    df_sorted = df.sort_values('timestamp')
+    if peak_reference_kva is not None:
+        # Absolute ceiling provided by user — use it for every day.
+        df['_ref_peak'] = float(peak_reference_kva)
+    else:
+        # Rolling 30-day maximum of kva (using data prior to each day).
+        # We compute a per-day maximum then roll over calendar days.
+        daily_max = df_sorted.groupby('date')['kva'].max().sort_index()
+        rolling_ref = daily_max.shift(1).rolling(30, min_periods=1).max()
+        # For the very first day there is no prior history — fall back to
+        # 110% of the first day's actual peak as a conservative estimate.
+        first_day_fallback = daily_max.iloc[0] * 1.10
+        rolling_ref = rolling_ref.fillna(first_day_fallback)
+        ref_map = rolling_ref.to_dict()
+        df['_ref_peak'] = df['date'].map(ref_map)
 
-            fig.update_layout(
-                template="plotly_dark", height=480,
-                title=dict(
-                    text=f"Window {page + 1}  ·  "
-                         f"{window_start_ts.strftime('%d %b %H:%M')} → "
-                         f"{window_end_ts.strftime('%d %b %H:%M')}",
-                    font=dict(size=13), x=0,
-                ),
-                xaxis=dict(
-                    title="Time",
-                    range=[window_start_ts, window_end_ts],
-                ),
-                yaxis_title="kW Import",
-                hovermode="x unified",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+    for date, day_df in df.groupby('date'):
+        day_df = day_df.sort_values('timestamp').reset_index(drop=True)
+
+        # FIX 3: Use the rolling reference peak, not the day's own maximum.
+        ref_peak             = day_df['_ref_peak'].iloc[0]
+        day_peak             = day_df['kva'].max()           # kept for reporting only
+        discharge_trigger    = ref_peak  * peak_target_pct
+        discharge_proximity  = ref_peak  * DISCHARGE_PROXIMITY_PCT
+        charge_upper         = ref_peak  * bat_charge_upper_pct
+        charge_lower         = ref_peak  * bat_charge_lower_pct
+        # FIX 7: Normal charging ceiling (92%), emergency ceiling (100%).
+        charge_kva_ceiling   = discharge_trigger * CHARGE_PEAK_GUARD_PCT
+        emergency_kva_ceiling= discharge_trigger * EMERGENCY_PEAK_GUARD_PCT
+
+        # FIX 4: Build a simple look-ahead profile from today's data.
+        # "High-load" intervals are those whose kva ≥ 90% of reference peak.
+        lookahead_high = set(
+            day_df.index[day_df['kva'] >= ref_peak * 0.90].tolist()
+        )
+
+        for idx, row in day_df.iterrows():
+            kva_orig = row['kva']
+            kw       = row['kw_net']
+            kvar     = row['kvar_net']
+
+            ev_kva   = kva_orig * ev_p
+            hvac_kva = kva_orig * hvac_p
+            misc_kva = kva_orig * misc_p
+
+            ev_f = hvac_f = misc_f = 1.0
+            bat_chg_kw = bat_dis_kw = 0.0
+            actions = []
+
+            # FIX 1: Track kW and kVAR separately; recompute kVA each time.
+            mgd_kw   = kw
+            mgd_kvar = kvar
+            mgd_kva  = calc_kva(mgd_kw, mgd_kvar)
+
+            # FIX 4: Look-ahead — check if any of the next N intervals are
+            # flagged as high-load.  If so, treat *this* interval as also in
+            # the peak zone so the battery starts discharging earlier.
+            upcoming_high = any(
+                (idx + k) in lookahead_high
+                for k in range(1, lookahead_intervals + 1)
             )
-            st.plotly_chart(fig, use_container_width=True, key=f"sim_main_{sim_state.tick}")
 
-            # ---------------- SECONDARY CHARTS ----------------
-            fva = build_forecast_vs_actual_df(sim_state)
-            verified = fva[fva["actual"].notna()]
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 1 — BATTERY DISCHARGE
+            #   Guard 1: kva_orig in peak zone (≥ 80% of reference peak)
+            #            OR look-ahead shows a peak coming soon.
+            #   Guard 2: current managed kVA ≥ discharge_trigger
+            #   Guard 3: SOC > bat_dis_min  (15% floor)
+            #   Discharge amount = exact kW needed to reach trigger via a
+            #     proper kW/kVAR decomposition, capped by C-rate and SOC.
+            # ═══════════════════════════════════════════════════════════════
+            in_peak_zone = kva_orig >= discharge_proximity or upcoming_high
+            soc_ok_dis   = bat_soc > bat_dis_min
 
-            if len(verified) > 0:
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.subheader("📊 Forecast vs Actual @ verified timestamps")
-                    fig2 = go.Figure()
-                    fig2.add_trace(go.Scatter(x=verified["target_ts"], y=verified["median"],
-                        name="Forecast", line=dict(color="#ff9a3c", width=2, dash="dot")))
-                    fig2.add_trace(go.Scatter(x=verified["target_ts"], y=verified["actual"],
-                        name="Actual", line=dict(color="#00d4aa", width=2)))
-                    fig2.update_layout(template="plotly_dark", height=320,
-                        xaxis_title="Time", yaxis_title="kW", hovermode="x unified",
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
-                    st.plotly_chart(fig2, use_container_width=True, key=f"sim_vs_{sim_state.tick}")
+            if in_peak_zone and mgd_kva >= discharge_trigger and soc_ok_dis:
+                needed_kva = mgd_kva - discharge_trigger          # kVA gap to close
+                avail_kwh  = bat_soc - bat_dis_min
 
-                with c2:
-                    st.subheader("📉 MAPE improvement (retrain events)")
-                    if len(sim_state.retrain_log) > 0:
-                        log = pd.DataFrame(sim_state.retrain_log)
-                        fig3 = go.Figure()
-                        fig3.add_trace(go.Scatter(
-                            x=log["reveal_ts"], y=log["mean_mape"],
-                            mode="lines+markers+text",
-                            text=[f"{v:.1f}%" for v in log["mean_mape"]],
-                            textposition="top center",
-                            line=dict(color="#00d4aa"), marker=dict(size=10)))
-                        fig3.update_layout(template="plotly_dark", height=320,
-                            xaxis_title="Retrain event", yaxis_title="MAPE (%)",
-                            showlegend=False)
-                        st.plotly_chart(fig3, use_container_width=True,
-                            key=f"sim_mape_{sim_state.tick}")
-                    else:
-                        st.info("Waiting for first retrain event…")
+                # FIX 1: Decompose the needed kVA reduction into kW by
+                # scaling along the active-power axis (same power factor).
+                # dis_kw reduces kw_net; kvar is unchanged.
+                pf = (mgd_kw / mgd_kva) if mgd_kva > 0 else 1.0
+                needed_kw_reduction = needed_kva * pf   # kW needed to close gap
 
-            # ---------------- AUTO-ADVANCE ----------------
-            # Streamlit doesn't have background loops, so we use this pattern:
-            # if playing, sleep for tick_interval, advance once, rerun.
-            # Each rerun re-executes the whole script, landing here and
-            # advancing again.
-            if st.session_state.sim_running and not sim_state.is_finished:
-                now = time.time()
-                elapsed = now - st.session_state.sim_last_advance_time
-                wait = max(0.0, sim_state.tick_interval_s - elapsed)
-                if wait > 0:
-                    time.sleep(wait)
-                advance_one_tick(fc, sim_state)
-                st.session_state.sim_last_advance_time = time.time()
-                st.rerun()
-
-# ======================================================= TAB 4: CV
-with tab4:
-    st.header("Time-Series Cross-Validation")
-    if fc is None or st.session_state.history is None:
-        st.warning("Train a model first.")
-    else:
-        cA, cB, cC = st.columns(3)
-        n_splits = cA.number_input("CV folds", 2, 8, 4)
-        min_train_days = cB.number_input("Min training days", 14, 90, 21)
-        val_block = cC.number_input("Val block (days)", 3, 14, 5)
-
-        if st.button("🧪 Run CV", type="primary"):
-            t0 = time.time()
-            with st.spinner(f"Running {n_splits}-fold CV…"):
-                report = expanding_window_cv(
-                    st.session_state.history,
-                    forecaster_factory=lambda: DirectMultiStepForecaster(
-                        capacity_kwp=fc.capacity_kwp, n_estimators=150),
-                    n_splits=int(n_splits),
-                    min_train_days=int(min_train_days),
-                    val_block_days=int(val_block),
-                    forecast_origins_per_fold=5,
+                dis_kwh    = min(
+                    needed_kw_reduction * INTERVAL_H,   # energy to cover gap
+                    dis_rate_kw * INTERVAL_H,            # C-rate cap
+                    avail_kwh                             # what's in the battery
                 )
-                st.session_state.cv_report = report
-            st.success(f"✅ CV done in {time.time()-t0:.1f}s")
+                dis_kw     = dis_kwh / INTERVAL_H
+                soc_before = bat_soc
+                bat_soc   -= dis_kwh
+                mgd_kw    -= dis_kw
+                mgd_kva    = calc_kva(mgd_kw, mgd_kvar)   # recompute properly
+                mgd_kva    = max(mgd_kva, 0.0)
+                bat_dis_kw = dis_kw
+                actions.append({
+                    'type':           'battery_discharge',
+                    'load':           'Battery',
+                    'discharge_kw':   round(dis_kw, 2),
+                    'soc_before_kwh': round(soc_before, 1),
+                    'soc_after_kwh':  round(bat_soc, 1),
+                    'kva_before':     round(kva_orig, 2),
+                    'kva_after':      round(mgd_kva, 2),
+                    'lookahead_triggered': bool(upcoming_high and kva_orig < discharge_proximity),
+                    'note': (f'Battery discharged {round(dis_kw,1)} kW '
+                             f'(SOC {round(soc_before,0):.0f}→{round(bat_soc,0):.0f} kWh / '
+                             f'{round(bat_soc/bat_max*100,0):.0f}%) '
+                             f'→ kVA {round(kva_orig,1)}→{round(mgd_kva,1)}'
+                             + (' [look-ahead]' if upcoming_high and kva_orig < discharge_proximity else ''))
+                })
 
-        report = st.session_state.cv_report
-        if report:
-            st.subheader("Aggregate")
-            rows = []
-            for h, m in sorted(report["aggregate"].items()):
-                hl = f"+{h*30}min" if h*30 < 60 else f"+{h/2:.1f}h"
-                rows.append({"Horizon": hl, "Mean MAPE": f"{m['mean_mape']:.2f}%",
-                    "± Std": f"{m['std_mape']:.2f}%", "Mean MAE": f"{m['mean_mae']:.1f} kW",
-                    "n folds": m["n_folds"]})
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-            with st.expander("📋 Plain-text report"):
-                st.code(format_cv_report(report))
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 2 — LOAD REDUCTION  (if still above target after discharge)
+            # FIX 1: Each load cut reduces kW and kVAR proportionally
+            # (same power factor as the full load), then kVA is recomputed
+            # via √(kW²+kVAR²) rather than being decremented directly.
+            # ═══════════════════════════════════════════════════════════════
+            remaining_cut = max(0.0, mgd_kva - discharge_trigger)
+            if remaining_cut > 1e-3:
+                for load in priority_order:
+                    if remaining_cut <= 1e-3:
+                        break
 
-# ======================================================= TAB 5: DIAGNOSTICS
-with tab5:
-    st.header("Model Diagnostics")
-    if fc is None or metrics is None:
-        st.warning("Train a model first.")
-    else:
-        c1, c2 = st.columns(2)
-        with c1:
-            st.subheader("Per-Horizon Accuracy")
-            ph = metrics.get("per_horizon", {})
-            rows = []
-            for h, m in sorted(ph.items()):
-                hl = f"+{h*30}min" if h*30 < 60 else f"+{h/2:.1f}h"
-                rows.append({"Horizon": hl, "MAE (kW)": f"{m['mae']:.1f}",
-                    "MAPE (%)": f"{m['mape']:.2f}"})
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        with c2:
-            st.subheader("Update History")
-            if st.session_state.update_log:
-                ldf = pd.DataFrame(st.session_state.update_log)
-                ldf["time"] = ldf["time"].dt.strftime("%H:%M:%S")
-                st.dataframe(ldf, use_container_width=True, hide_index=True)
+                    if load == 'misc' and misc_kva > 0:
+                        max_possible = misc_kva * max_cut_pct.get('misc', 0.20)
+                        cut_kva = min(remaining_cut, max_possible)
+                        misc_f  = 1.0 - cut_kva / misc_kva
+                        # Decompose cut into kW and kVAR using load's power factor
+                        pf_misc   = mgd_kw   / mgd_kva if mgd_kva > 0 else 1.0
+                        qf_misc   = mgd_kvar / mgd_kva if mgd_kva > 0 else 0.0
+                        mgd_kw   -= cut_kva * pf_misc
+                        mgd_kvar -= cut_kva * qf_misc
+                        mgd_kva   = calc_kva(mgd_kw, mgd_kvar)
+                        remaining_cut = max(0.0, mgd_kva - discharge_trigger)
+                        if cut_kva > 0.05:
+                            actions.append({
+                                'type': 'load_reduction', 'load': 'Miscellaneous',
+                                'cut_kva': round(cut_kva,2), 'factor_pct': round(misc_f*100,1),
+                                'max_cut_pct': max_cut_pct.get('misc',0.20)*100,
+                                'note': (f'Misc cut {round(cut_kva,1)} kVA '
+                                         f'(max {round(max_cut_pct.get("misc",0.20)*100,0):.0f}%) '
+                                         f'→ {round(misc_f*100,1)}%')
+                            })
 
-        st.subheader("Save / Load Model")
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("💾 Save"):
-                Path("models").mkdir(exist_ok=True)
-                p = Path("models") / f"{st.session_state.site_name.replace(' ', '_')}.joblib"
-                fc.save(p)
-                st.success(f"Saved to {p}")
-        with c2:
-            saved = list(Path("models").glob("*.joblib")) if Path("models").exists() else []
-            if saved:
-                pick = st.selectbox("Load", [str(p) for p in saved])
-                if st.button("📂 Load"):
-                    st.session_state.forecaster = DirectMultiStepForecaster.load(pick)
-                    st.session_state.forecast_result = st.session_state.forecaster.forecast(48)
-                    st.success(f"Loaded {pick}")
-                    st.rerun()
+                    elif load == 'hvac' and hvac_kva > 0:
+                        max_possible = hvac_kva * max_cut_pct.get('hvac', 0.15)
+                        cut_kva = min(remaining_cut, max_possible)
+                        hvac_f  = 1.0 - cut_kva / hvac_kva
+                        pf_hvac   = mgd_kw   / mgd_kva if mgd_kva > 0 else 1.0
+                        qf_hvac   = mgd_kvar / mgd_kva if mgd_kva > 0 else 0.0
+                        mgd_kw   -= cut_kva * pf_hvac
+                        mgd_kvar -= cut_kva * qf_hvac
+                        mgd_kva   = calc_kva(mgd_kw, mgd_kvar)
+                        remaining_cut = max(0.0, mgd_kva - discharge_trigger)
+                        if cut_kva > 0.05:
+                            actions.append({
+                                'type': 'load_reduction', 'load': 'HVAC',
+                                'cut_kva': round(cut_kva,2), 'factor_pct': round(hvac_f*100,1),
+                                'max_cut_pct': max_cut_pct.get('hvac',0.15)*100,
+                                'note': (f'HVAC cut {round(cut_kva,1)} kVA '
+                                         f'(max {round(max_cut_pct.get("hvac",0.15)*100,0):.0f}%) '
+                                         f'→ {round(hvac_f*100,1)}%')
+                            })
+
+                    elif load == 'ev' and ev_kva > 0:
+                        max_possible = ev_kva * max_cut_pct.get('ev', 0.10)
+                        cut_kva = min(remaining_cut, max_possible)
+                        ev_f    = 1.0 - cut_kva / ev_kva
+                        pf_ev     = mgd_kw   / mgd_kva if mgd_kva > 0 else 1.0
+                        qf_ev     = mgd_kvar / mgd_kva if mgd_kva > 0 else 0.0
+                        mgd_kw   -= cut_kva * pf_ev
+                        mgd_kvar -= cut_kva * qf_ev
+                        mgd_kva   = calc_kva(mgd_kw, mgd_kvar)
+                        remaining_cut = max(0.0, mgd_kva - discharge_trigger)
+                        if cut_kva > 0.05:
+                            actions.append({
+                                'type': 'load_reduction', 'load': 'EV Charger',
+                                'cut_kva': round(cut_kva,2), 'factor_pct': round(ev_f*100,1),
+                                'max_cut_pct': max_cut_pct.get('ev',0.10)*100,
+                                'note': (f'EV cut {round(cut_kva,1)} kVA '
+                                         f'(max {round(max_cut_pct.get("ev",0.10)*100,0):.0f}%) '
+                                         f'→ {round(ev_f*100,1)}%')
+                            })
+
+            ev_m   = ev_kva   * ev_f
+            hvac_m = hvac_kva * hvac_f
+            misc_m = misc_kva * misc_f
+
+            # ═══════════════════════════════════════════════════════════════
+            # STEP 3 — BATTERY CHARGE
+            #
+            # Hard pre-conditions (skip entirely if any fail):
+            #   • Not discharging this interval
+            #   • Battery is not already full (SOC < bat_max)
+            #   • Remaining headroom under the charge ceiling > 0
+            #     (ceiling = 92% of discharge_trigger, prevents charger
+            #      from itself creating a peak in the 90-95% zone)
+            #
+            # Trigger:
+            #   A) Emergency: SOC < 15% of capacity  (charge regardless of kva)
+            #   B) Normal   : kva_original < charge_upper AND SOC < 90%
+            #
+            # Charge amount = min(0.5C × 0.5h,  headroom_to_ceiling,  room_in_battery)
+            # ═══════════════════════════════════════════════════════════════
+            if bat_dis_kw == 0 and bat_soc < bat_max:
+                emergency_charge = bat_soc < bat_emergency_abs
+                # FIX 7: Emergency uses a higher ceiling (100% of target, not 92%).
+                active_ceiling   = emergency_kva_ceiling if emergency_charge else charge_kva_ceiling
+                # FIX 1: headroom computed against current mgd_kva (already correct kVA)
+                kva_headroom = active_ceiling - mgd_kva
+                if kva_headroom > 0:
+                    normal_charge    = (kva_orig < charge_upper) and (bat_soc < bat_full)
+
+                    if emergency_charge or normal_charge:
+                        room_in_bat = bat_max - bat_soc
+                        chg_kwh = min(
+                            chg_rate_kw * INTERVAL_H,
+                            kva_headroom * INTERVAL_H,
+                            room_in_bat
+                        )
+                        if chg_kwh > 0.01:
+                            soc_before  = bat_soc
+                            bat_soc    += chg_kwh
+                            bat_chg_kw  = chg_kwh / INTERVAL_H
+                            # FIX 1: charger draws real kW — add to kw_net, recompute kVA.
+                            mgd_kw    += bat_chg_kw
+                            mgd_kva    = calc_kva(mgd_kw, mgd_kvar)
+                            reason = ('Emergency charge (SOC < 15%)'
+                                      if emergency_charge else
+                                      f'Normal charge (kVA {round(kva_orig,0):.0f} '
+                                      f'< {round(charge_upper,0):.0f} upper threshold)')
+                            actions.append({
+                                'type':             'battery_charge',
+                                'load':             'Battery',
+                                'charge_kw':        round(bat_chg_kw, 2),
+                                'soc_before_kwh':   round(soc_before, 1),
+                                'soc_after_kwh':    round(bat_soc, 1),
+                                'kva_ceiling':      round(active_ceiling, 2),
+                                'kva_after_charge': round(mgd_kva, 2),
+                                'charge_trigger':   'emergency' if emergency_charge else 'normal',
+                                'note': (f'{reason}: +{round(bat_chg_kw,1)} kW '
+                                         f'(SOC {round(soc_before,0):.0f}→{round(bat_soc,0):.0f} kWh / '
+                                         f'{round(bat_soc/bat_max*100,0):.0f}%) '
+                                         f'kVA now {round(mgd_kva,1)} '
+                                         f'(ceiling {round(active_ceiling,1)})')
+                            })
+
+            bat_soc    = max(bat_min_abs, min(bat_max, bat_soc))
+            bat_action = bat_dis_kw - bat_chg_kw
+
+            # FIX 6: Compute per-load kVAh cut for this interval (kVA × 0.5 h).
+            ev_kvah_cut   = (ev_kva   - ev_m)   * INTERVAL_H
+            hvac_kvah_cut = (hvac_kva - hvac_m) * INTERVAL_H
+            misc_kvah_cut = (misc_kva - misc_m) * INTERVAL_H
+
+            results.append({
+                'timestamp':              row['timestamp'].isoformat(),
+                'date':                   str(date),
+                'kva_original':           round(kva_orig, 2),
+                'kw_original':            round(kw, 2),
+                'kvar_original':          round(kvar, 2),
+                'kw_managed':             round(mgd_kw, 2),
+                'kvar_managed':           round(mgd_kvar, 2),
+                'ev_kva':                 round(ev_kva, 2),
+                'hvac_kva':               round(hvac_kva, 2),
+                'misc_kva':              round(misc_kva, 2),
+                'ev_managed':             round(ev_m, 2),
+                'hvac_managed':           round(hvac_m, 2),
+                'misc_managed':           round(misc_m, 2),
+                'ev_factor':              round(ev_f, 3),
+                'hvac_factor':            round(hvac_f, 3),
+                'misc_factor':            round(misc_f, 3),
+                # FIX 6: per-load curtailment energy this interval
+                'ev_kvah_cut':            round(ev_kvah_cut, 3),
+                'hvac_kvah_cut':          round(hvac_kvah_cut, 3),
+                'misc_kvah_cut':          round(misc_kvah_cut, 3),
+                'battery_action_kw':      round(bat_action, 2),
+                'battery_charge_kw':      round(bat_chg_kw, 2),
+                'battery_discharge_kw':   round(bat_dis_kw, 2),
+                'battery_soc_kwh':        round(bat_soc, 2),
+                'battery_soc_pct':        round(bat_soc / bat_max * 100, 1) if bat_max else 0,
+                'kva_managed':            round(mgd_kva, 2),
+                'target_peak':            round(discharge_trigger, 2),
+                'ref_peak':               round(ref_peak, 2),
+                'discharge_proximity':    round(discharge_proximity, 2),
+                'charge_kva_ceiling':     round(charge_kva_ceiling, 2),
+                'emergency_kva_ceiling':  round(emergency_kva_ceiling, 2),
+                'charge_threshold_upper': round(charge_upper, 2),
+                'charge_threshold_lower': round(charge_lower, 2),
+                'day_peak':               round(day_peak, 2),
+                'bat_capacity':           round(bat_max, 2),
+                'actions':                actions,
+            })
+
+    return results
+
+
+# ── Flask routes ──────────────────────────────────────────────────────────────
+@app.route('/')
+def serve_frontend():
+    return send_from_directory('static', 'index.html')
+
+
+@app.route('/api/upload', methods=['POST'])
+def upload_data():
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
+        f = request.files['file']
+        content = f.read()
+        df = parse_uploaded_data(content, f.filename)
+        records = [{'timestamp': row['timestamp'].isoformat(),
+                    'kva':       round(row['kva'], 2),
+                    'kw_net':    round(row['kw_net'], 2),
+                    'kvar_net':  round(row['kvar_net'], 2),
+                    'kw_import': round(row['kw_import'], 2),
+                    'kw_export': round(row['kw_export'], 2)}
+                   for _, row in df.iterrows()]
+        dates = sorted(df['timestamp'].dt.date.astype(str).unique().tolist())
+        return jsonify({'success': True, 'records': records, 'dates': dates,
+                        'total_intervals': len(records),
+                        'peak_kva': round(df['kva'].max(), 2),
+                        'avg_kva':  round(df['kva'].mean(), 2)})
+    except Exception as e:
+        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 400
+
+
+@app.route('/api/optimize', methods=['POST'])
+def optimize():
+    try:
+        data             = request.json
+        records          = data.get('records', [])
+        proportions      = data.get('proportions', {'ev':0.3,'hvac':0.4,'misc':0.3})
+        battery_capacity = float(data.get('battery_capacity_kwh', 200))
+        priority_order   = data.get('priority_order', ['misc','hvac','ev'])
+        peak_target_pct  = float(data.get('peak_target_pct', 0.85))
+        max_cut_pct      = data.get('max_cut_pct', {'ev':0.10,'hvac':0.15,'misc':0.20})
+        bat_charge_upper = float(data.get('bat_charge_upper_pct', 0.70))
+        bat_charge_lower = float(data.get('bat_charge_lower_pct', 0.60))
+        # FIX 5: C-rate is now user-configurable (default 0.5C).
+        c_rate           = float(data.get('c_rate', 0.5))
+        # FIX 2: Initial SOC for the very first interval (default 50%).
+        initial_soc_pct  = float(data.get('initial_soc_pct', 0.50))
+        # FIX 3: Optional absolute kVA ceiling; None = use 30-day rolling max.
+        peak_ref_kva     = data.get('peak_reference_kva', None)
+        if peak_ref_kva is not None:
+            peak_ref_kva = float(peak_ref_kva)
+        # FIX 4: Number of look-ahead intervals (default 3 = 1.5 hours).
+        lookahead        = int(data.get('lookahead_intervals', 3))
+
+        # ensure float values
+        max_cut_pct = {k: float(v) for k,v in max_cut_pct.items()}
+
+        df = pd.DataFrame(records)
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+        results = run_ai_manager(df, proportions, battery_capacity, priority_order,
+                                 peak_target_pct, max_cut_pct,
+                                 bat_charge_upper, bat_charge_lower,
+                                 c_rate=c_rate, initial_soc_pct=initial_soc_pct,
+                                 peak_reference_kva=peak_ref_kva,
+                                 lookahead_intervals=lookahead)
+
+        day_summaries = {}
+        for r in results:
+            d = r['date']
+            if d not in day_summaries:
+                day_summaries[d] = {
+                    'orig_peak':0,'managed_peak':0,
+                    'total_discharge_kwh':0,'total_charge_kwh':0,
+                    'intervals_battery_discharge':0,'intervals_battery_charge':0,
+                    'intervals_load_reduced':0,
+                    # FIX 6: aggregate per-load curtailment energy
+                    'ev_total_kvah_cut':0,'hvac_total_kvah_cut':0,'misc_total_kvah_cut':0,
+                }
+            s = day_summaries[d]
+            s['orig_peak']    = max(s['orig_peak'],    r['kva_original'])
+            s['managed_peak'] = max(s['managed_peak'], r['kva_managed'])
+            s['total_discharge_kwh'] += r['battery_discharge_kw'] * 0.5
+            s['total_charge_kwh']    += r['battery_charge_kw']    * 0.5
+            # FIX 6: accumulate per-load kVAh cuts
+            s['ev_total_kvah_cut']   += r.get('ev_kvah_cut',   0)
+            s['hvac_total_kvah_cut'] += r.get('hvac_kvah_cut', 0)
+            s['misc_total_kvah_cut'] += r.get('misc_kvah_cut', 0)
+            for act in r['actions']:
+                if act['type']=='battery_discharge': s['intervals_battery_discharge']+=1
+                elif act['type']=='battery_charge':  s['intervals_battery_charge']+=1
+                elif act['type']=='load_reduction':  s['intervals_load_reduced']+=1
+
+        # Round kVAh summaries
+        for s in day_summaries.values():
+            s['ev_total_kvah_cut']   = round(s['ev_total_kvah_cut'],   2)
+            s['hvac_total_kvah_cut'] = round(s['hvac_total_kvah_cut'], 2)
+            s['misc_total_kvah_cut'] = round(s['misc_total_kvah_cut'], 2)
+
+        overall_orig    = max((s['orig_peak']    for s in day_summaries.values()), default=0)
+        overall_managed = max((s['managed_peak'] for s in day_summaries.values()), default=0)
+        peak_red = ((overall_orig-overall_managed)/overall_orig*100) if overall_orig else 0
+
+        return jsonify({
+            'success': True, 'results': results, 'day_summaries': day_summaries,
+            'summary': {
+                'original_peak_kva':           round(overall_orig,2),
+                'managed_peak_kva':            round(overall_managed,2),
+                'peak_reduction_pct':          round(peak_red,1),
+                'total_battery_discharge_kwh': round(sum(s['total_discharge_kwh'] for s in day_summaries.values()),1),
+                'total_battery_charge_kwh':    round(sum(s['total_charge_kwh']    for s in day_summaries.values()),1),
+                'avg_original_kva': round(sum(r['kva_original'] for r in results)/len(results),2) if results else 0,
+                'avg_managed_kva':  round(sum(r['kva_managed']  for r in results)/len(results),2) if results else 0,
+            }
+        })
+    except Exception as e:
+        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 400
+
+
+if __name__ == '__main__':
+    os.makedirs('static', exist_ok=True)
+    print("="*55)
+    print("  AI Energy Manager  v4  |  http://localhost:5050")
+    print("="*55)
+    app.run(debug=True, port=5050)

@@ -1,0 +1,1093 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Energy Manager — Peak Load Optimizer v3</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0b0f1c;--s1:#111827;--s2:#182035;--border:#1f2f4a;
+  --accent:#00d4ff;--accent2:#7c3aed;--green:#22c55e;--amber:#f59e0b;
+  --red:#ef4444;--ev:#00b4d8;--hvac:#f59e0b;--misc:#a78bfa;
+  --chg:#22c55e;--dis:#f97316;--text:#dde4f0;--muted:#6b7a9a;
+  --TNR:'Times New Roman',Times,serif;
+}
+body{background:var(--bg);color:var(--text);font-family:var(--TNR);min-height:100vh;overflow-x:hidden}
+body::before{content:'';position:fixed;inset:0;
+  background-image:linear-gradient(rgba(0,212,255,.025) 1px,transparent 1px),
+  linear-gradient(90deg,rgba(0,212,255,.025) 1px,transparent 1px);
+  background-size:44px 44px;pointer-events:none;z-index:0}
+
+/* HEADER */
+header{position:relative;z-index:10;padding:16px 32px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;justify-content:space-between;
+  background:rgba(11,15,28,.95);backdrop-filter:blur(10px)}
+.logo-icon{width:36px;height:36px;border:2px solid var(--accent);border-radius:8px;
+  display:flex;align-items:center;justify-content:center;font-size:18px;
+  box-shadow:0 0 16px rgba(0,212,255,.35)}
+.logo-wrap{display:flex;align-items:center;gap:11px}
+.logo-title{font-size:19px;font-weight:700;letter-spacing:-.3px}
+.logo-title span{color:var(--accent)}
+.logo-sub{font-size:11px;color:var(--muted);margin-top:2px;font-style:italic}
+.hdr-badge{font-size:11px;padding:4px 14px;border:1px solid var(--accent2);border-radius:20px;
+  color:var(--accent2);background:rgba(124,58,237,.12);font-style:italic}
+
+/* LAYOUT */
+.layout{display:grid;grid-template-columns:340px 1fr;min-height:calc(100vh - 65px);position:relative;z-index:1}
+
+/* SIDEBAR */
+.sidebar{border-right:1px solid var(--border);padding:18px 16px;
+  background:rgba(17,24,39,.65);overflow-y:auto;display:flex;flex-direction:column;gap:18px}
+.sec-label{font-size:10px;letter-spacing:2.5px;text-transform:uppercase;color:var(--accent);
+  margin-bottom:8px;display:flex;align-items:center;gap:8px;font-style:italic}
+.sec-label::after{content:'';flex:1;height:1px;background:var(--border)}
+
+/* Upload */
+.upload-zone{border:2px dashed var(--border);border-radius:10px;padding:22px 14px;
+  text-align:center;cursor:pointer;transition:all .3s;background:rgba(0,212,255,.02)}
+.upload-zone:hover,.upload-zone.drag{border-color:var(--accent);background:rgba(0,212,255,.05)}
+.upload-zone input{display:none}
+.upload-icon{font-size:26px;margin-bottom:5px}
+.upload-zone strong{font-size:13px;display:block;margin-bottom:3px}
+.upload-zone p{font-size:11px;color:var(--muted);line-height:1.5}
+.file-tag{font-size:11px;color:var(--accent);margin-top:7px;word-break:break-all;font-style:italic}
+
+/* Select */
+select{width:100%;background:var(--s2);border:1px solid var(--border);border-radius:8px;
+  color:var(--text);padding:8px 11px;font-family:var(--TNR);font-size:13px;
+  appearance:none;cursor:pointer;outline:none}
+select:focus{border-color:var(--accent)}
+
+/* Proportion inputs */
+.prop-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:5px}
+.prop-label{font-size:11px;color:var(--muted);margin-bottom:3px;display:flex;align-items:center;gap:5px}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0}
+.dot-ev{background:var(--ev);box-shadow:0 0 6px var(--ev)}
+.dot-hvac{background:var(--hvac);box-shadow:0 0 6px var(--hvac)}
+.dot-misc{background:var(--misc);box-shadow:0 0 6px var(--misc)}
+.prop-row{display:flex;align-items:center;gap:5px}
+.prop-number,.cfg-input,.bat-input{background:var(--s2);border:1px solid var(--border);border-radius:6px;
+  color:var(--text);font-family:var(--TNR);font-size:13px;outline:none;transition:border-color .2s}
+.prop-number{flex:1;padding:6px 7px;text-align:center}
+.prop-number:focus,.cfg-input:focus,.bat-input:focus{border-color:var(--accent)}
+.prop-unit{font-size:11px;color:var(--muted)}
+input[type=range]{-webkit-appearance:none;width:100%;height:3px;border-radius:2px;
+  background:var(--border);outline:none;cursor:pointer;margin-top:4px}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;
+  border-radius:50%;background:var(--accent);box-shadow:0 0 6px var(--accent)}
+.prop-total{font-size:11px;text-align:right;margin-top:3px;font-style:italic}
+.prop-total.ok{color:var(--green)}.prop-total.warn{color:var(--red)}
+
+/* Priority */
+.priority-list{display:flex;flex-direction:column;gap:5px}
+.priority-item{display:flex;align-items:center;gap:6px;background:var(--s2);
+  border:1px solid var(--border);border-radius:8px;padding:7px 10px;cursor:grab;
+  transition:all .2s;user-select:none}
+.priority-item:hover{border-color:var(--accent)}
+.priority-item.dragging{opacity:.45}
+.p-rank{font-size:10px;color:var(--muted);width:14px;font-style:italic}
+.p-name{flex:1;font-size:13px;font-weight:700}
+.p-badge{font-size:9px;padding:2px 6px;border-radius:4px;font-style:italic}
+.badge-high{color:var(--accent);background:rgba(0,212,255,.12);border:1px solid rgba(0,212,255,.25)}
+.badge-med{color:var(--hvac);background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.25)}
+.badge-low{color:var(--misc);background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.25)}
+.drag-handle{color:var(--muted)}
+
+/* Max cut inputs */
+.maxcut-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
+.maxcut-item{text-align:center}
+.maxcut-label{font-size:10px;color:var(--muted);margin-bottom:3px;
+  display:flex;align-items:center;gap:3px;justify-content:center;font-style:italic}
+.maxcut-input{width:100%;background:var(--s2);border:1px solid var(--border);border-radius:6px;
+  color:var(--text);font-family:var(--TNR);font-size:13px;padding:6px 4px;
+  text-align:center;outline:none;transition:border-color .2s}
+.maxcut-input:focus{border-color:var(--accent)}
+
+/* Battery config */
+.bat-row{display:flex;gap:7px;align-items:center}
+.bat-input{flex:1;padding:8px 11px;font-size:14px}
+.bat-unit{font-size:11px;color:var(--muted);white-space:nowrap}
+.cfg-row{display:flex;align-items:center;gap:7px;margin-top:7px}
+.cfg-row label{font-size:11px;color:var(--muted);flex:1;font-style:italic}
+.cfg-input{width:62px;padding:5px 7px;text-align:center}
+.bat-thresholds{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px}
+.thresh-item{background:var(--s2);border:1px solid var(--border);border-radius:7px;padding:7px 9px}
+.thresh-label{font-size:10px;color:var(--muted);margin-bottom:4px;font-style:italic}
+.thresh-row{display:flex;align-items:center;gap:5px}
+.thresh-input{flex:1;background:transparent;border:none;border-bottom:1px solid var(--border);
+  color:var(--text);font-family:var(--TNR);font-size:13px;padding:3px 5px;
+  text-align:center;outline:none}
+.thresh-input:focus{border-bottom-color:var(--accent)}
+.thresh-unit{font-size:10px;color:var(--muted)}
+.bat-info{font-size:10px;color:var(--muted);margin-top:6px;line-height:1.55;font-style:italic;
+  background:rgba(0,212,255,.04);border-left:2px solid var(--accent);padding:5px 8px;border-radius:0 4px 4px 0}
+
+/* Run Button */
+.run-btn{width:100%;padding:12px;background:linear-gradient(135deg,var(--accent2),#4f46e5);
+  border:none;border-radius:10px;color:#fff;font-family:var(--TNR);font-size:15px;font-weight:700;
+  cursor:pointer;transition:all .3s;letter-spacing:.3px;position:relative;overflow:hidden}
+.run-btn:hover{transform:translateY(-1px);box-shadow:0 8px 25px rgba(124,58,237,.45)}
+.run-btn:active{transform:translateY(0)}
+.run-btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+
+/* Status */
+.status-bar{display:flex;align-items:center;gap:8px;padding:8px 12px;
+  background:var(--s2);border:1px solid var(--border);border-radius:8px;
+  font-size:11px;color:var(--muted);font-style:italic}
+.sdot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex-shrink:0}
+.sdot.active{background:var(--green);box-shadow:0 0 6px var(--green);animation:blink 2s infinite}
+.sdot.loading{background:var(--accent);box-shadow:0 0 6px var(--accent);animation:blink .7s infinite}
+.sdot.error{background:var(--red);box-shadow:0 0 6px var(--red)}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+.spinner{display:none;width:13px;height:13px;border:2px solid var(--border);
+  border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* MAIN CONTENT */
+.content{padding:20px 24px;overflow-y:auto;display:flex;flex-direction:column;gap:18px}
+
+/* KPI */
+.kpi-row{display:grid;grid-template-columns:repeat(4,1fr);gap:11px}
+.kpi-card{background:var(--s1);border:1px solid var(--border);border-radius:12px;
+  padding:14px 17px;position:relative;overflow:hidden}
+.kpi-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px}
+.kpi-card.c-a::before{background:var(--muted)}
+.kpi-card.c-b::before{background:var(--green)}
+.kpi-card.c-c::before{background:var(--accent)}
+.kpi-card.c-d::before{background:var(--dis)}
+.kpi-card.c-e::before{background:var(--chg)}
+.kpi-label{font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:8px;font-style:italic}
+.kpi-value{font-size:24px;font-weight:700;line-height:1}
+.kpi-unit{font-size:12px;font-weight:400;color:var(--muted);margin-left:3px}
+.kpi-sub{font-size:11px;color:var(--muted);margin-top:3px;font-style:italic}
+
+/* Chart panels */
+.chart-panel{background:var(--s1);border:1px solid var(--border);border-radius:13px;padding:18px 20px}
+.panel-hdr{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:14px}
+.panel-title{font-size:14px;font-weight:700}
+.panel-sub{font-size:11px;color:var(--muted);margin-top:3px;font-style:italic}
+.legend-pills{display:flex;gap:9px;flex-wrap:wrap;justify-content:flex-end}
+.pill{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--muted);font-style:italic}
+.pill-dot{width:8px;height:8px;border-radius:50%}
+.chart-wrap{position:relative;width:100%}
+
+/* SOC gauge row */
+.soc-row{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.soc-gauge-wrap{flex:1}
+.soc-gauge-track{height:10px;background:var(--border);border-radius:5px;overflow:hidden}
+.soc-gauge-fill{height:100%;border-radius:5px;transition:width .5s;background:var(--green)}
+.soc-labels{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-top:3px;font-style:italic}
+.soc-pct{font-size:18px;font-weight:700;color:var(--green);min-width:55px;text-align:right}
+
+/* Battery detail cards */
+.bat-detail-row{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-top:12px}
+.bat-detail-card{background:var(--s2);border:1px solid var(--border);border-radius:9px;padding:10px 12px}
+.bdc-label{font-size:10px;color:var(--muted);margin-bottom:4px;font-style:italic}
+.bdc-value{font-size:16px;font-weight:700}
+.bdc-unit{font-size:11px;color:var(--muted);margin-left:3px;font-weight:400}
+
+/* Empty state */
+.empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:9px;height:200px;color:var(--muted);font-size:13px;
+  border:1px dashed var(--border);border-radius:10px;font-style:italic}
+.empty-icon{font-size:36px;opacity:.3}
+
+/* ACTION LOG */
+.action-panel{background:var(--s1);border:1px solid var(--border);border-radius:13px}
+.action-header{padding:14px 20px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:10px}
+.action-header-title{font-size:14px;font-weight:700;flex:1}
+.action-filter{display:flex;gap:5px;flex-wrap:wrap}
+.filter-btn{font-family:var(--TNR);font-size:10px;padding:3px 11px;border-radius:20px;
+  cursor:pointer;transition:all .2s;border:1px solid var(--border);background:transparent;
+  color:var(--muted);font-style:italic}
+.filter-btn:hover,.filter-btn.active{border-color:var(--accent);color:var(--accent);background:rgba(0,212,255,.08)}
+.filter-btn.f-load.active{border-color:var(--ev);color:var(--ev);background:rgba(0,180,216,.08)}
+.filter-btn.f-dis.active{border-color:var(--dis);color:var(--dis);background:rgba(249,115,22,.08)}
+.filter-btn.f-chg.active{border-color:var(--chg);color:var(--chg);background:rgba(34,197,94,.08)}
+.action-table-wrap{overflow-x:auto;max-height:300px;overflow-y:auto}
+.action-table{width:100%;border-collapse:collapse;font-size:12px}
+.action-table th{position:sticky;top:0;background:var(--s2);padding:8px 12px;text-align:left;
+  font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);
+  border-bottom:1px solid var(--border);font-style:italic}
+.action-table td{padding:7px 12px;border-bottom:1px solid rgba(31,47,74,.5);vertical-align:middle}
+.action-table tr:hover td{background:rgba(0,212,255,.025)}
+.type-badge{display:inline-block;font-size:9px;padding:2px 7px;border-radius:4px;
+  font-weight:700;font-style:italic;white-space:nowrap}
+.tb-lr{background:rgba(0,180,216,.15);color:var(--ev);border:1px solid rgba(0,180,216,.3)}
+.tb-dis{background:rgba(249,115,22,.15);color:var(--dis);border:1px solid rgba(249,115,22,.3)}
+.tb-chg{background:rgba(34,197,94,.15);color:var(--chg);border:1px solid rgba(34,197,94,.3)}
+.tb-chg-em{background:rgba(239,68,68,.15);color:var(--red);border:1px solid rgba(239,68,68,.3)}
+.no-actions{padding:36px;text-align:center;color:var(--muted);font-size:13px;font-style:italic}
+
+::-webkit-scrollbar{width:5px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--muted)}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo-wrap">
+    <div class="logo-icon">⚡</div>
+    <div>
+      <div class="logo-title">AI <span>Energy</span> Manager</div>
+      <div class="logo-sub">Peak Load Optimizer · MD Charge Reduction · Malaysia Commercial Buildings</div>
+    </div>
+  </div>
+  <div class="hdr-badge">v4 — 7-Fix Logic Patch</div>
+</header>
+
+<div class="layout">
+
+<!-- ══════════════ SIDEBAR ══════════════ -->
+<aside class="sidebar">
+
+  <!-- Upload -->
+  <div>
+    <div class="sec-label">Data Input</div>
+    <div class="upload-zone" id="uploadZone">
+      <input type="file" id="fileInput" accept=".csv,.xlsx,.xls">
+      <div class="upload-icon">📂</div>
+      <strong>Upload Load Profile</strong>
+      <p>CSV or Excel — kW / kVAR import &amp; export<br>30-min interval data (any date range)</p>
+      <div class="file-tag" id="fileName"></div>
+    </div>
+  </div>
+
+  <!-- Date -->
+  <div>
+    <div class="sec-label">View Day</div>
+    <select id="dateSelect">
+      <option value="all">— All Dates (full dataset) —</option>
+    </select>
+  </div>
+
+  <!-- Proportions -->
+  <div>
+    <div class="sec-label">Load Proportions</div>
+    <div class="prop-grid">
+      <div class="prop-item">
+        <div class="prop-label"><span class="dot dot-ev"></span> EV Charger</div>
+        <div class="prop-row">
+          <input type="number" class="prop-number" id="evNum" value="30" min="0" max="100" step="1">
+          <span class="prop-unit">%</span>
+        </div>
+        <input type="range" id="evSlider" min="0" max="100" value="30">
+      </div>
+      <div class="prop-item">
+        <div class="prop-label"><span class="dot dot-hvac"></span> HVAC</div>
+        <div class="prop-row">
+          <input type="number" class="prop-number" id="hvacNum" value="40" min="0" max="100" step="1">
+          <span class="prop-unit">%</span>
+        </div>
+        <input type="range" id="hvacSlider" min="0" max="100" value="40">
+      </div>
+      <div class="prop-item" style="grid-column:1/-1">
+        <div class="prop-label"><span class="dot dot-misc"></span> Miscellaneous</div>
+        <div class="prop-row">
+          <input type="number" class="prop-number" id="miscNum" value="30" min="0" max="100" step="1">
+          <span class="prop-unit">%</span>
+        </div>
+        <input type="range" id="miscSlider" min="0" max="100" value="30">
+      </div>
+    </div>
+    <div class="prop-total ok" id="propTotal">Total: 100% ✓</div>
+  </div>
+
+  <!-- Max Cut -->
+  <div>
+    <div class="sec-label">Max Load Reduction Allowed</div>
+    <p style="font-size:10px;color:var(--muted);margin-bottom:8px;font-style:italic">
+      Maximum % of each load's kVA that can be cut. Battery discharge is tried first.
+    </p>
+    <div class="maxcut-grid">
+      <div class="maxcut-item">
+        <div class="maxcut-label"><span class="dot dot-ev"></span> EV</div>
+        <input type="number" class="maxcut-input" id="maxCutEv" value="10" min="0" max="100" step="1">
+        <div style="font-size:9px;color:var(--muted);margin-top:2px">%</div>
+      </div>
+      <div class="maxcut-item">
+        <div class="maxcut-label"><span class="dot dot-hvac"></span> HVAC</div>
+        <input type="number" class="maxcut-input" id="maxCutHvac" value="15" min="0" max="100" step="1">
+        <div style="font-size:9px;color:var(--muted);margin-top:2px">%</div>
+      </div>
+      <div class="maxcut-item">
+        <div class="maxcut-label"><span class="dot dot-misc"></span> Misc</div>
+        <input type="number" class="maxcut-input" id="maxCutMisc" value="20" min="0" max="100" step="1">
+        <div style="font-size:9px;color:var(--muted);margin-top:2px">%</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Priority -->
+  <div>
+    <div class="sec-label">Load Priority Order</div>
+    <p style="font-size:10px;color:var(--muted);margin-bottom:7px;font-style:italic">Drag to reorder. High priority = reduced last. Battery always discharges first.</p>
+    <div class="priority-list" id="priorityList">
+      <div class="priority-item" data-load="ev" draggable="true">
+        <span class="p-rank">1</span><span class="dot dot-ev"></span>
+        <span class="p-name">EV Charger</span>
+        <span class="p-badge badge-high">HIGH</span><span class="drag-handle">⠿</span>
+      </div>
+      <div class="priority-item" data-load="hvac" draggable="true">
+        <span class="p-rank">2</span><span class="dot dot-hvac"></span>
+        <span class="p-name">HVAC</span>
+        <span class="p-badge badge-med">MED</span><span class="drag-handle">⠿</span>
+      </div>
+      <div class="priority-item" data-load="misc" draggable="true">
+        <span class="p-rank">3</span><span class="dot dot-misc"></span>
+        <span class="p-name">Miscellaneous</span>
+        <span class="p-badge badge-low">LOW</span><span class="drag-handle">⠿</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Battery -->
+  <div>
+    <div class="sec-label">Battery Storage</div>
+    <div class="bat-row">
+      <input type="number" class="bat-input" id="batterySize" value="200" min="0" step="10">
+      <span class="bat-unit">kWh capacity</span>
+    </div>
+    <!-- FIX 5: C-rate -->
+    <div class="cfg-row" style="margin-top:7px">
+      <label style="font-size:11px;color:var(--muted)">C-rate limit (e.g. 0.5 = 0.5C, typical LFP)</label>
+      <div style="display:flex;align-items:center;gap:6px;margin-top:3px">
+        <input type="number" class="cfg-input" id="cRate" value="0.5" min="0.1" max="2.0" step="0.1" style="width:70px;padding:5px 7px">
+        <span style="font-size:10px;color:var(--muted)">C  (max charge/discharge power = C-rate × capacity kW)</span>
+      </div>
+    </div>
+    <!-- FIX 2: Initial SOC -->
+    <div class="cfg-row" style="margin-top:7px">
+      <label style="font-size:11px;color:var(--muted)">Initial SOC (first interval of dataset)</label>
+      <div style="display:flex;align-items:center;gap:6px;margin-top:3px">
+        <input type="number" class="cfg-input" id="initialSoc" value="50" min="5" max="100" step="5" style="width:70px;padding:5px 7px">
+        <span style="font-size:10px;color:var(--muted)">%  (SOC carries over between days automatically)</span>
+      </div>
+    </div>
+    <div class="cfg-row">
+      <label>Peak target (% of reference peak to stay below)</label>
+      <input type="number" class="cfg-input" id="peakTarget" value="85" min="50" max="99" step="1">
+      <span style="font-size:10px;color:var(--muted)">%</span>
+    </div>
+    <!-- FIX 3: Peak reference -->
+    <div class="cfg-row" style="margin-top:7px">
+      <label style="font-size:11px;color:var(--muted)">Peak reference ceiling (leave blank = auto 30-day rolling max)</label>
+      <div style="display:flex;align-items:center;gap:6px;margin-top:3px">
+        <input type="number" class="cfg-input" id="peakRefKva" value="" min="0" step="10" placeholder="auto" style="width:80px;padding:5px 7px">
+        <span style="font-size:10px;color:var(--muted)">kVA absolute ceiling</span>
+      </div>
+      <div style="font-size:9px;color:var(--muted);margin-top:3px;font-style:italic">Using auto prevents "knowing the future" bias in simulation</div>
+    </div>
+    <!-- FIX 4: Look-ahead -->
+    <div class="cfg-row" style="margin-top:7px">
+      <label style="font-size:11px;color:var(--muted)">Look-ahead intervals (pre-discharge before expected peak)</label>
+      <div style="display:flex;align-items:center;gap:6px;margin-top:3px">
+        <input type="number" class="cfg-input" id="lookahead" value="3" min="0" max="12" step="1" style="width:70px;padding:5px 7px">
+        <span style="font-size:10px;color:var(--muted)">× 30 min  (0 = reactive only, 3 = 1.5 h ahead)</span>
+      </div>
+    </div>
+    <div class="bat-thresholds">
+      <div class="thresh-item">
+        <div class="thresh-label">🔼 Charge Upper Threshold</div>
+        <div class="thresh-row">
+          <input type="number" class="thresh-input" id="chargeUpper" value="70" min="50" max="95" step="1">
+          <span class="thresh-unit">% of peak</span>
+        </div>
+        <div style="font-size:9px;color:var(--muted);margin-top:3px;font-style:italic">Charge when kVA below this</div>
+      </div>
+      <div class="thresh-item">
+        <div class="thresh-label">🔽 Charge Lower Threshold</div>
+        <div class="thresh-row">
+          <input type="number" class="thresh-input" id="chargeLower" value="60" min="30" max="90" step="1">
+          <span class="thresh-unit">% of peak</span>
+        </div>
+        <div style="font-size:9px;color:var(--muted);margin-top:3px;font-style:italic">Preferred deep-charge zone</div>
+      </div>
+    </div>
+    <div class="bat-info">
+      Charge: SOC &lt; 15% (emergency, uses 100% ceiling) or kVA &lt; Upper% &amp; SOC &lt; 90% (92% ceiling)<br>
+      Discharge: kVA ≥ target% &amp; SOC &gt; 15%  |  Look-ahead: pre-discharge N intervals before peak<br>
+      kW/kVAR tracked separately; kVA = √(kW²+kVAR²). SOC persists across days.
+    </div>
+  </div>
+
+  <!-- Run -->
+  <button class="run-btn" id="runBtn" disabled>⚡ Run AI Optimisation</button>
+
+  <div class="status-bar">
+    <div class="sdot" id="statusDot"></div>
+    <div class="spinner" id="spinner"></div>
+    <span id="statusMsg">Upload a dataset to begin</span>
+  </div>
+
+</aside>
+
+<!-- ══════════════ MAIN CONTENT ══════════════ -->
+<main class="content">
+
+  <!-- KPI -->
+  <div class="kpi-row" id="kpiRow" style="display:none">
+    <div class="kpi-card c-a">
+      <div class="kpi-label">Original Peak kVA</div>
+      <div class="kpi-value"><span id="kpiOrig">—</span><span class="kpi-unit">kVA</span></div>
+      <div class="kpi-sub">Before optimisation</div>
+    </div>
+    <div class="kpi-card c-b">
+      <div class="kpi-label">Managed Peak kVA</div>
+      <div class="kpi-value"><span id="kpiManaged">—</span><span class="kpi-unit">kVA</span></div>
+      <div class="kpi-sub">After AI management</div>
+    </div>
+    <div class="kpi-card c-c">
+      <div class="kpi-label">Peak Reduction</div>
+      <div class="kpi-value"><span id="kpiRed">—</span><span class="kpi-unit">%</span></div>
+      <div class="kpi-sub">MD charge saving</div>
+    </div>
+    <div class="kpi-card c-d">
+      <div class="kpi-label">Battery Discharged</div>
+      <div class="kpi-value"><span id="kpiBatDis">—</span><span class="kpi-unit">kWh</span></div>
+      <div class="kpi-sub">Total peak shaving</div>
+    </div>
+  </div>
+
+  <!-- Input chart -->
+  <div class="chart-panel">
+    <div class="panel-hdr">
+      <div>
+        <div class="panel-title">Input Load Profile — Raw Data</div>
+        <div class="panel-sub">30-min kVA from power triangle √(kW² + kVAR²) · grey = raw kVA</div>
+      </div>
+      <div class="legend-pills">
+        <span class="pill"><span class="pill-dot" style="background:#94a3b8"></span>kVA raw</span>
+        <span class="pill"><span class="pill-dot" style="background:var(--ev)"></span>kW net</span>
+      </div>
+    </div>
+    <div class="chart-wrap" style="height:200px">
+      <canvas id="inputChart"></canvas>
+      <div class="empty-state" id="inputEmpty"><div class="empty-icon">📂</div><span>Upload a dataset to display</span></div>
+    </div>
+  </div>
+
+  <!-- Output chart -->
+  <div class="chart-panel">
+    <div class="panel-hdr">
+      <div>
+        <div class="panel-title">Optimised Load — AI Manager Output</div>
+        <div class="panel-sub">Stacked bars = load breakdown after management · Lines = before / after / thresholds</div>
+      </div>
+      <div class="legend-pills" id="outLegend" style="display:none">
+        <span class="pill"><span class="pill-dot" style="background:var(--ev)"></span>EV</span>
+        <span class="pill"><span class="pill-dot" style="background:var(--hvac)"></span>HVAC</span>
+        <span class="pill"><span class="pill-dot" style="background:var(--misc)"></span>Misc</span>
+        <span class="pill"><span class="pill-dot" style="background:var(--chg)"></span>Bat Charge</span>
+        <span class="pill"><span class="pill-dot" style="background:var(--dis)"></span>Bat Discharge</span>
+        <span class="pill"><span class="pill-dot" style="background:#94a3b8;width:14px;height:2px;border-radius:1px"></span>Original</span>
+        <span class="pill"><span class="pill-dot" style="background:var(--green);width:14px;height:2px;border-radius:1px"></span>Managed</span>
+        <span class="pill"><span class="pill-dot" style="background:var(--red);width:14px;height:2px;border-radius:1px"></span>Target</span>
+        <span class="pill"><span class="pill-dot" style="background:var(--chg);width:14px;height:2px;border-radius:1px"></span>Charge ≤</span>
+      </div>
+    </div>
+    <div class="chart-wrap" style="height:280px">
+      <canvas id="outputChart"></canvas>
+      <div class="empty-state" id="outputEmpty"><div class="empty-icon">⚡</div><span>Run optimisation to view results</span></div>
+    </div>
+  </div>
+
+  <!-- Battery chart -->
+  <div class="chart-panel">
+    <div class="panel-hdr">
+      <div>
+        <div class="panel-title">Battery — State of Charge &amp; Power Flow</div>
+        <div class="panel-sub">SOC (kWh, left axis) · Charge / Discharge power kW (right axis, per 30-min interval)</div>
+      </div>
+      <div class="legend-pills">
+        <span class="pill"><span class="pill-dot" style="background:var(--green)"></span>SOC kWh</span>
+        <span class="pill"><span class="pill-dot" style="background:var(--chg)"></span>Charging kW</span>
+        <span class="pill"><span class="pill-dot" style="background:var(--dis)"></span>Discharging kW</span>
+        <span class="pill"><span class="pill-dot" style="background:var(--red)"></span>Emergency Chg kW</span>
+      </div>
+    </div>
+
+    <!-- Live SOC gauge (updates after optimise) -->
+    <div class="soc-row" id="socGaugeRow" style="display:none">
+      <div style="font-size:11px;color:var(--muted);font-style:italic;white-space:nowrap">End SOC</div>
+      <div class="soc-gauge-wrap">
+        <div class="soc-gauge-track"><div class="soc-gauge-fill" id="socFill" style="width:50%"></div></div>
+        <div class="soc-labels"><span>0%</span><span>20% min</span><span>90% full</span><span>100%</span></div>
+      </div>
+      <div class="soc-pct" id="socPct">—</div>
+    </div>
+
+    <div class="chart-wrap" style="height:200px">
+      <canvas id="batteryChart"></canvas>
+      <div class="empty-state" id="batEmpty"><div class="empty-icon">🔋</div><span>Run optimisation to view battery behaviour</span></div>
+    </div>
+
+    <!-- Battery detail cards -->
+    <div class="bat-detail-row" id="batDetailRow" style="display:none">
+      <div class="bat-detail-card">
+        <div class="bdc-label">⬆ Total Charged</div>
+        <div class="bdc-value"><span id="bdcChg">—</span><span class="bdc-unit">kWh</span></div>
+      </div>
+      <div class="bat-detail-card">
+        <div class="bdc-label">⬇ Total Discharged</div>
+        <div class="bdc-value"><span id="bdcDis">—</span><span class="bdc-unit">kWh</span></div>
+      </div>
+      <div class="bat-detail-card">
+        <div class="bdc-label">⚠ Emergency Charges</div>
+        <div class="bdc-value"><span id="bdcEmerg">—</span><span class="bdc-unit">intervals</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Fix 6: Per-load kVAh curtailment summary -->
+  <div class="action-panel" id="curtailPanel" style="display:none;margin-top:0">
+    <div class="action-header">
+      <div class="action-header-title">📊 Curtailment Summary — kVAh Cut Per Load Type</div>
+      <div style="font-size:11px;color:var(--muted);font-style:italic">Total apparent energy curtailed per day · Key justification metric for building occupants</div>
+    </div>
+    <div style="overflow-x:auto">
+      <table class="action-table" id="curtailTable">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th style="color:var(--ev)">🔌 EV kVAh Cut</th>
+            <th style="color:var(--hvac)">❄ HVAC kVAh Cut</th>
+            <th style="color:var(--misc)">⚙ Misc kVAh Cut</th>
+            <th>Total kVAh Cut</th>
+            <th style="color:var(--dis)">🔋 Discharge kWh</th>
+            <th style="color:var(--chg)">⬆ Charge kWh</th>
+            <th>Orig Peak kVA</th>
+            <th>Managed Peak kVA</th>
+            <th>Reduction</th>
+          </tr>
+        </thead>
+        <tbody id="curtailTbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Action Log -->
+
+  <div class="action-panel" id="actionPanel" style="display:none">
+    <div class="action-header">
+      <div class="action-header-title">🔍 AI Manager — Optimisation Action Log</div>
+      <div class="action-filter">
+        <button class="filter-btn active" data-filter="all">All</button>
+        <button class="filter-btn f-load" data-filter="load_reduction">Load Cuts</button>
+        <button class="filter-btn f-dis"  data-filter="battery_discharge">Discharge</button>
+        <button class="filter-btn f-chg"  data-filter="battery_charge">Charge</button>
+      </div>
+    </div>
+    <div class="action-table-wrap">
+      <table class="action-table">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Type</th>
+            <th>Component</th>
+            <th>kVA Before</th>
+            <th>Δ kW</th>
+            <th>kVA After</th>
+            <th>Battery SOC</th>
+            <th>Max Cut / Factor</th>
+            <th>Detail</th>
+          </tr>
+        </thead>
+        <tbody id="actionTbody"></tbody>
+      </table>
+      <div class="no-actions" id="noActions" style="display:none">No actions match this filter.</div>
+    </div>
+  </div>
+
+</main>
+</div>
+
+<script>
+/* ═══════════════════════════════════════════
+   STATE
+═══════════════════════════════════════════ */
+const API = 'http://localhost:5050';
+let rawRecords = [], optResults = [], allActions = [];
+let activeFilter = 'all';
+let inputChartInst = null, outputChartInst = null, batChartInst = null;
+
+Chart.defaults.color       = '#6b7a9a';
+Chart.defaults.borderColor = '#1f2f4a';
+Chart.defaults.font.family = "'Times New Roman', Times, serif";
+Chart.defaults.font.size   = 11;
+
+/* ═══════════════════════════════════════════
+   UPLOAD
+═══════════════════════════════════════════ */
+const uploadZone = document.getElementById('uploadZone');
+const fileInput  = document.getElementById('fileInput');
+uploadZone.addEventListener('click', () => fileInput.click());
+uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('drag'); });
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag'));
+uploadZone.addEventListener('drop', e => { e.preventDefault(); uploadZone.classList.remove('drag'); if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]); });
+fileInput.addEventListener('change', () => { if (fileInput.files[0]) handleFile(fileInput.files[0]); });
+
+async function handleFile(file) {
+  document.getElementById('fileName').textContent = file.name;
+  setStatus('loading', 'Uploading & parsing dataset…');
+  document.getElementById('runBtn').disabled = true;
+  const fd = new FormData(); fd.append('file', file);
+  try {
+    const res  = await fetch(`${API}/api/upload`, { method: 'POST', body: fd });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error);
+    rawRecords = data.records;
+    const ds = document.getElementById('dateSelect');
+    ds.innerHTML = '<option value="all">— All Dates (full dataset) —</option>';
+    data.dates.forEach(d => { const o = document.createElement('option'); o.value = d; o.textContent = d; ds.appendChild(o); });
+    setStatus('active', `Loaded ${data.total_intervals} intervals · Peak: ${data.peak_kva} kVA`);
+    document.getElementById('runBtn').disabled = false;
+    drawInputChart();
+  } catch(e) { setStatus('error', 'Upload error: ' + e.message); }
+}
+
+/* ═══════════════════════════════════════════
+   PROPORTION SYNC
+═══════════════════════════════════════════ */
+function syncProp(nId, sId) {
+  const n = document.getElementById(nId), s = document.getElementById(sId);
+  n.addEventListener('input', () => { s.value = n.value; checkTotal(); });
+  s.addEventListener('input', () => { n.value = s.value; checkTotal(); });
+}
+syncProp('evNum','evSlider'); syncProp('hvacNum','hvacSlider'); syncProp('miscNum','miscSlider');
+
+function checkTotal() {
+  const t = +document.getElementById('evNum').value
+          + +document.getElementById('hvacNum').value
+          + +document.getElementById('miscNum').value;
+  const el = document.getElementById('propTotal');
+  el.textContent = `Total: ${t}%` + (t === 100 ? ' ✓' : ' — must equal 100');
+  el.className   = 'prop-total ' + (t === 100 ? 'ok' : 'warn');
+}
+
+/* ═══════════════════════════════════════════
+   PRIORITY DRAG
+═══════════════════════════════════════════ */
+const pList = document.getElementById('priorityList');
+let dragEl = null;
+pList.addEventListener('dragstart', e => { dragEl = e.target.closest('.priority-item'); dragEl.classList.add('dragging'); });
+pList.addEventListener('dragover',  e => {
+  e.preventDefault();
+  const over = e.target.closest('.priority-item');
+  if (!over || over === dragEl) return;
+  const items = [...pList.querySelectorAll('.priority-item')];
+  if (items.indexOf(over) < items.indexOf(dragEl)) pList.insertBefore(dragEl, over);
+  else pList.insertBefore(dragEl, over.nextSibling);
+  refreshRanks();
+});
+pList.addEventListener('dragend', () => { if (dragEl) dragEl.classList.remove('dragging'); dragEl = null; });
+
+function refreshRanks() {
+  [...pList.querySelectorAll('.priority-item')].forEach((el, i) => {
+    el.querySelector('.p-rank').textContent = i + 1;
+    const b = el.querySelector('.p-badge');
+    if (i === 0) { b.textContent = 'HIGH'; b.className = 'p-badge badge-high'; }
+    else if (i === 1) { b.textContent = 'MED';  b.className = 'p-badge badge-med'; }
+    else { b.textContent = 'LOW'; b.className = 'p-badge badge-low'; }
+  });
+}
+
+function getPriority() {
+  const loads = [...pList.querySelectorAll('.priority-item')].map(e => e.dataset.load);
+  return loads.slice().reverse(); // low→high for backend
+}
+
+/* ═══════════════════════════════════════════
+   DATE FILTER
+═══════════════════════════════════════════ */
+document.getElementById('dateSelect').addEventListener('change', () => {
+  drawInputChart();
+  if (optResults.length) { drawOutputChart(); drawBatteryChart(); }
+  renderActionLog();
+});
+
+const filterRaw = () => {
+  const d = document.getElementById('dateSelect').value;
+  return d === 'all' ? rawRecords : rawRecords.filter(r => r.timestamp.startsWith(d));
+};
+const filterOpt = () => {
+  const d = document.getElementById('dateSelect').value;
+  return d === 'all' ? optResults : optResults.filter(r => r.timestamp.startsWith(d));
+};
+
+/* ═══════════════════════════════════════════
+   INPUT CHART
+═══════════════════════════════════════════ */
+function drawInputChart() {
+  const data = filterRaw();
+  document.getElementById('inputEmpty').style.display = data.length ? 'none' : 'flex';
+  if (!data.length) return;
+  if (inputChartInst) inputChartInst.destroy();
+  inputChartInst = new Chart(document.getElementById('inputChart'), {
+    type: 'line',
+    data: { labels: data.map(r => fmtTime(r.timestamp)), datasets: [
+      { label:'kVA', data: data.map(r => r.kva),
+        borderColor:'#94a3b8', backgroundColor:'rgba(148,163,184,.07)',
+        borderWidth:1.5, pointRadius:0, fill:true, tension:.3 },
+      { label:'kW net', data: data.map(r => r.kw_net),
+        borderColor:'rgba(0,180,216,.5)', borderWidth:1, pointRadius:0,
+        fill:false, tension:.3, borderDash:[5,4] }
+    ]},
+    options: stdOptions('kVA / kW', false)
+  });
+}
+
+/* ═══════════════════════════════════════════
+   RUN
+═══════════════════════════════════════════ */
+document.getElementById('runBtn').addEventListener('click', runOpt);
+
+async function runOpt() {
+  if (!rawRecords.length) return;
+  const ev = +document.getElementById('evNum').value;
+  const hv = +document.getElementById('hvacNum').value;
+  const ms = +document.getElementById('miscNum').value;
+  if (ev + hv + ms !== 100) { setStatus('error', 'Proportions must total 100%'); return; }
+
+  setStatus('loading', 'Running AI Manager optimisation (per-day)…');
+  document.getElementById('runBtn').disabled = true;
+  document.getElementById('spinner').style.display = 'block';
+
+  const payload = {
+    records:              rawRecords,
+    proportions:          { ev: ev/100, hvac: hv/100, misc: ms/100 },
+    battery_capacity_kwh: +document.getElementById('batterySize').value || 200,
+    priority_order:       getPriority(),
+    peak_target_pct:      (+document.getElementById('peakTarget').value || 85) / 100,
+    max_cut_pct: {
+      ev:   (+document.getElementById('maxCutEv').value   || 10) / 100,
+      hvac: (+document.getElementById('maxCutHvac').value || 15) / 100,
+      misc: (+document.getElementById('maxCutMisc').value || 20) / 100,
+    },
+    bat_charge_upper_pct: (+document.getElementById('chargeUpper').value || 70) / 100,
+    bat_charge_lower_pct: (+document.getElementById('chargeLower').value || 60) / 100,
+    // Fix 2: initial SOC
+    initial_soc_pct:      (+document.getElementById('initialSoc').value || 50) / 100,
+    // Fix 3: peak reference (blank = auto rolling)
+    peak_reference_kva:   document.getElementById('peakRefKva').value.trim() !== ''
+                            ? +document.getElementById('peakRefKva').value : null,
+    // Fix 4: look-ahead intervals
+    lookahead_intervals:  +document.getElementById('lookahead').value || 3,
+    // Fix 5: C-rate
+    c_rate:               +document.getElementById('cRate').value || 0.5,
+  };
+
+  try {
+    const res  = await fetch(`${API}/api/optimize`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error);
+
+    optResults = data.results;
+
+    // flatten actions
+    allActions = [];
+    optResults.forEach(r => r.actions.forEach(a => allActions.push({ ...a, timestamp: r.timestamp, kva_original: r.kva_original, kva_managed: r.kva_managed })));
+
+    updateKPIs(data.summary);
+    drawOutputChart();
+    drawBatteryChart();
+    renderActionLog();
+    updateBatteryDetails(data.summary);
+    renderCurtailmentTable(data.day_summaries);
+
+    document.getElementById('kpiRow').style.display = 'grid';
+    document.getElementById('outLegend').style.display = 'flex';
+    document.getElementById('actionPanel').style.display = 'block';
+    document.getElementById('curtailPanel').style.display = 'block';
+    setStatus('active', `Done · Peak ↓ ${data.summary.peak_reduction_pct}% · Discharged ${data.summary.total_battery_discharge_kwh} kWh`);
+  } catch(e) { setStatus('error', 'Error: ' + e.message); }
+  finally { document.getElementById('runBtn').disabled = false; document.getElementById('spinner').style.display = 'none'; }
+}
+
+/* ═══════════════════════════════════════════
+   KPI + BATTERY DETAILS
+═══════════════════════════════════════════ */
+function updateKPIs(s) {
+  document.getElementById('kpiOrig').textContent    = s.original_peak_kva;
+  document.getElementById('kpiManaged').textContent = s.managed_peak_kva;
+  document.getElementById('kpiRed').textContent     = s.peak_reduction_pct;
+  document.getElementById('kpiBatDis').textContent  = s.total_battery_discharge_kwh;
+}
+
+function updateBatteryDetails(s) {
+  document.getElementById('bdcChg').textContent  = s.total_battery_charge_kwh;
+  document.getElementById('bdcDis').textContent  = s.total_battery_discharge_kwh;
+
+  // count emergency charge intervals
+  const emergCount = allActions.filter(a => a.type === 'battery_charge' && a.charge_trigger === 'emergency').length;
+  document.getElementById('bdcEmerg').textContent = emergCount;
+
+  // end SOC from last interval
+  if (optResults.length) {
+    const last = filterOpt();
+    if (last.length) {
+      const pct = last[last.length-1].battery_soc_pct;
+      document.getElementById('socFill').style.width = pct + '%';
+      document.getElementById('socFill').style.background = pct < 20 ? 'var(--red)' : pct > 85 ? 'var(--green)' : 'var(--amber)';
+      document.getElementById('socPct').textContent = pct + '%';
+    }
+  }
+  document.getElementById('socGaugeRow').style.display = 'flex';
+  document.getElementById('batDetailRow').style.display = 'grid';
+}
+
+/* ═══════════════════════════════════════════
+   OUTPUT CHART
+═══════════════════════════════════════════ */
+function drawOutputChart() {
+  const data = filterOpt();
+  document.getElementById('outputEmpty').style.display = data.length ? 'none' : 'flex';
+  if (!data.length) return;
+  const labels = data.map(r => fmtTime(r.timestamp));
+  if (outputChartInst) outputChartInst.destroy();
+  outputChartInst = new Chart(document.getElementById('outputChart'), {
+    data: { labels, datasets: [
+      // Stacked bars
+      { type:'bar', label:'EV Charger',  data: data.map(r => r.ev_managed),
+        backgroundColor:'rgba(0,180,216,.72)', stack:'m', yAxisID:'y', order:2 },
+      { type:'bar', label:'HVAC',        data: data.map(r => r.hvac_managed),
+        backgroundColor:'rgba(245,158,11,.72)', stack:'m', yAxisID:'y', order:2 },
+      { type:'bar', label:'Misc',        data: data.map(r => r.misc_managed),
+        backgroundColor:'rgba(167,139,250,.72)', stack:'m', yAxisID:'y', order:2 },
+      { type:'bar', label:'Bat Charge (grid)', data: data.map(r => r.battery_charge_kw),
+        backgroundColor:'rgba(34,197,94,.45)', stack:'m', yAxisID:'y', order:2 },
+      { type:'bar', label:'Bat Discharge offset', data: data.map(r => -r.battery_discharge_kw),
+        backgroundColor:'rgba(249,115,22,.55)', stack:'m', yAxisID:'y', order:2 },
+      // Reference lines
+      { type:'line', label:'Original kVA', data: data.map(r => r.kva_original),
+        borderColor:'#94a3b8', borderWidth:1.5, pointRadius:0, fill:false, tension:.3, borderDash:[6,3], yAxisID:'y', order:1 },
+      { type:'line', label:'Managed kVA', data: data.map(r => r.kva_managed),
+        borderColor:'#22c55e', borderWidth:2.5, pointRadius:0, fill:false, tension:.3, yAxisID:'y', order:1 },
+      { type:'line', label:'Target Peak', data: data.map(r => r.target_peak),
+        borderColor:'#ef4444', borderWidth:1.2, borderDash:[8,4], pointRadius:0, fill:false, yAxisID:'y', order:1 },
+      { type:'line', label:'Charge Upper Threshold', data: data.map(r => r.charge_threshold_upper),
+        borderColor:'rgba(34,197,94,.5)', borderWidth:1, borderDash:[3,5], pointRadius:0, fill:false, yAxisID:'y', order:1 },
+    ]},
+    options: stdOptions('kVA', true)
+  });
+}
+
+/* ═══════════════════════════════════════════
+   BATTERY CHART
+═══════════════════════════════════════════ */
+function drawBatteryChart() {
+  const data = filterOpt();
+  document.getElementById('batEmpty').style.display = data.length ? 'none' : 'flex';
+  if (!data.length) return;
+  const labels = data.map(r => fmtTime(r.timestamp));
+
+  // split charge into normal vs emergency
+  const chgNormal = data.map(r => {
+    const a = r.actions.find(x => x.type==='battery_charge' && x.charge_trigger==='normal');
+    return a ? r.battery_charge_kw : 0;
+  });
+  const chgEmerg = data.map(r => {
+    const a = r.actions.find(x => x.type==='battery_charge' && x.charge_trigger==='emergency');
+    return a ? r.battery_charge_kw : 0;
+  });
+
+  if (batChartInst) batChartInst.destroy();
+  batChartInst = new Chart(document.getElementById('batteryChart'), {
+    data: { labels, datasets: [
+      { type:'bar', label:'Normal Charge (kW)',    data: chgNormal,
+        backgroundColor:'rgba(34,197,94,.65)',  yAxisID:'y2', stack:'bat', order:2 },
+      { type:'bar', label:'Emergency Charge (kW)', data: chgEmerg,
+        backgroundColor:'rgba(239,68,68,.70)',  yAxisID:'y2', stack:'bat', order:2 },
+      { type:'bar', label:'Discharge (kW)',        data: data.map(r => r.battery_discharge_kw),
+        backgroundColor:'rgba(249,115,22,.65)', yAxisID:'y2', stack:'bat', order:2 },
+      { type:'line', label:'SOC (kWh)', data: data.map(r => r.battery_soc_kwh),
+        borderColor:'#22c55e', backgroundColor:'rgba(34,197,94,.08)',
+        borderWidth:2.5, pointRadius:0, fill:true, tension:.4, yAxisID:'y', order:1 },
+    ]},
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      interaction:{ mode:'index', intersect:false },
+      plugins:{ legend:{ display:false }, tooltip: tooltipStyle() },
+      scales:{
+        x:{ grid:{ color:'rgba(31,47,74,.5)' }, ticks:{ maxTicksLimit:14 } },
+        y:{  position:'left',  grid:{ color:'rgba(31,47,74,.5)' },
+             title:{ display:true, text:'SOC (kWh)', color:'#6b7a9a', font:{ family:"'Times New Roman',Times,serif" } } },
+        y2:{ position:'right', grid:{ drawOnChartArea:false }, stacked:true,
+             title:{ display:true, text:'Power (kW)', color:'#6b7a9a', font:{ family:"'Times New Roman',Times,serif" } } }
+      }
+    }
+  });
+}
+
+/* ═══════════════════════════════════════════
+   ACTION LOG
+═══════════════════════════════════════════ */
+document.querySelectorAll('.filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    activeFilter = btn.dataset.filter;
+    renderActionLog();
+  });
+});
+
+function renderActionLog() {
+  const d = document.getElementById('dateSelect').value;
+  let acts = allActions;
+  if (d !== 'all') acts = acts.filter(a => a.timestamp.startsWith(d));
+  if (activeFilter !== 'all') acts = acts.filter(a => a.type === activeFilter);
+
+  const tbody = document.getElementById('actionTbody');
+  const noMsg = document.getElementById('noActions');
+  tbody.innerHTML = '';
+
+  if (!acts.length) { noMsg.style.display = 'block'; return; }
+  noMsg.style.display = 'none';
+
+  acts.forEach(a => {
+    const tr = document.createElement('tr');
+    let badge, deltaCell, socCell, factorCell;
+
+    if (a.type === 'load_reduction') {
+      badge      = `<span class="type-badge tb-lr">Load Cut</span>`;
+      deltaCell  = `<span style="color:var(--red)">−${a.cut_kva} kVA</span>`;
+      socCell    = `<span style="color:var(--muted)">—</span>`;
+      factorCell = `Max ${a.max_cut_pct}% · Running ${a.factor_pct}%`;
+    } else if (a.type === 'battery_discharge') {
+      // Fix 4: show look-ahead badge when discharge was triggered by lookahead, not raw kVA threshold
+      const laTag = a.lookahead_triggered
+        ? `<span style="font-size:9px;background:rgba(0,180,216,.18);color:var(--ev);
+                        border:1px solid rgba(0,180,216,.4);border-radius:3px;
+                        padding:1px 5px;margin-left:4px;vertical-align:middle">look-ahead</span>`
+        : '';
+      badge      = `<span class="type-badge tb-dis">Discharge</span>${laTag}`;
+      deltaCell  = `<span style="color:var(--dis)">−${a.discharge_kw} kW</span>`;
+      socCell    = `${a.soc_before_kwh} → <strong>${a.soc_after_kwh}</strong> kWh`;
+      factorCell = `kVA: ${a.kva_before} → ${a.kva_after}`;
+    } else {
+      const isEmerg = a.charge_trigger === 'emergency';
+      badge      = isEmerg ? `<span class="type-badge tb-chg-em">Emergency Chg</span>`
+                           : `<span class="type-badge tb-chg">Normal Chg</span>`;
+      deltaCell  = `<span style="color:var(--chg)">+${a.charge_kw} kW</span>`;
+      socCell    = `${a.soc_before_kwh} → <strong>${a.soc_after_kwh}</strong> kWh`;
+      // Fix 7: correct threshold label (15%), show which ceiling was used
+      factorCell = isEmerg
+        ? `SOC &lt; 15% · ceiling ${a.kva_ceiling ? a.kva_ceiling + ' kVA (100%)' : '100% target'}`
+        : `kVA in low zone · ceiling ${a.kva_ceiling ? a.kva_ceiling + ' kVA (92%)' : '92% target'}`;
+    }
+
+    tr.innerHTML = `
+      <td>${fmtTime(a.timestamp)}</td>
+      <td>${badge}</td>
+      <td style="font-weight:700">${a.load}</td>
+      <td style="color:var(--muted)">${a.kva_original} kVA</td>
+      <td>${deltaCell}</td>
+      <td style="color:var(--green)">${a.kva_managed} kVA</td>
+      <td style="font-family:'Times New Roman',serif;font-size:11px">${socCell}</td>
+      <td style="color:var(--muted);font-size:11px;font-style:italic">${factorCell}</td>
+      <td style="color:var(--muted);font-size:11px;font-style:italic">${a.note}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+/* ═══════════════════════════════════════════
+   FIX 6 — CURTAILMENT SUMMARY TABLE
+   Renders per-day kVAh cut totals per load type.
+   This is the key justification number for occupants.
+═══════════════════════════════════════════ */
+function renderCurtailmentTable(daySummaries) {
+  const tbody = document.getElementById('curtailTbody');
+  tbody.innerHTML = '';
+
+  const days = Object.keys(daySummaries).sort();
+  let totEv = 0, totHvac = 0, totMisc = 0, totDis = 0, totChg = 0;
+
+  days.forEach(date => {
+    const s   = daySummaries[date];
+    const ev  = s.ev_total_kvah_cut   || 0;
+    const hv  = s.hvac_total_kvah_cut || 0;
+    const ms  = s.misc_total_kvah_cut || 0;
+    const tot = +(ev + hv + ms).toFixed(2);
+    const red = s.orig_peak > 0
+      ? ((s.orig_peak - s.managed_peak) / s.orig_peak * 100).toFixed(1) + '%'
+      : '—';
+    totEv += ev; totHvac += hv; totMisc += ms;
+    totDis += s.total_discharge_kwh || 0;
+    totChg += s.total_charge_kwh    || 0;
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td style="font-weight:700">${date}</td>
+      <td style="color:var(--ev)">${ev.toFixed(2)}</td>
+      <td style="color:var(--hvac)">${hv.toFixed(2)}</td>
+      <td style="color:var(--misc)">${ms.toFixed(2)}</td>
+      <td style="font-weight:700">${tot}</td>
+      <td style="color:var(--dis)">${(s.total_discharge_kwh||0).toFixed(2)}</td>
+      <td style="color:var(--chg)">${(s.total_charge_kwh||0).toFixed(2)}</td>
+      <td style="color:var(--muted)">${s.orig_peak.toFixed(1)}</td>
+      <td style="color:var(--green)">${s.managed_peak.toFixed(1)}</td>
+      <td style="color:var(--amber);font-weight:700">${red}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  // Totals row
+  const totalRow = document.createElement('tr');
+  totalRow.style.cssText = 'border-top:2px solid var(--border);font-weight:700;background:rgba(31,47,74,.4)';
+  const grandTot = +(totEv + totHvac + totMisc).toFixed(2);
+  totalRow.innerHTML = `
+    <td style="font-style:italic">TOTAL (all days)</td>
+    <td style="color:var(--ev)">${totEv.toFixed(2)}</td>
+    <td style="color:var(--hvac)">${totHvac.toFixed(2)}</td>
+    <td style="color:var(--misc)">${totMisc.toFixed(2)}</td>
+    <td>${grandTot}</td>
+    <td style="color:var(--dis)">${totDis.toFixed(2)}</td>
+    <td style="color:var(--chg)">${totChg.toFixed(2)}</td>
+    <td colspan="3" style="color:var(--muted);font-style:italic;font-weight:400">
+      All kVAh values = kVA × 0.5 h per curtailed interval
+    </td>
+  `;
+  tbody.appendChild(totalRow);
+}
+
+/* ═══════════════════════════════════════════
+   HELPERS
+═══════════════════════════════════════════ */
+function fmtTime(iso) {
+  const d = new Date(iso);
+  return d.toLocaleTimeString('en-MY', { hour:'2-digit', minute:'2-digit' });
+}
+function tooltipStyle() {
+  return {
+    backgroundColor:'#182035', titleColor:'#dde4f0', bodyColor:'#6b7a9a',
+    borderColor:'#1f2f4a', borderWidth:1, padding:10,
+    titleFont:{ family:"'Times New Roman',Times,serif" },
+    bodyFont:{  family:"'Times New Roman',Times,serif" }
+  };
+}
+function stdOptions(yLabel, stacked) {
+  return {
+    responsive:true, maintainAspectRatio:false,
+    interaction:{ mode:'index', intersect:false },
+    plugins:{ legend:{ display:false }, tooltip: tooltipStyle() },
+    scales:{
+      x:{ grid:{ color:'rgba(31,47,74,.5)' }, ticks:{ maxTicksLimit:14 }, stacked },
+      y:{ grid:{ color:'rgba(31,47,74,.5)' }, stacked,
+          title:{ display:true, text:yLabel, color:'#6b7a9a', font:{ family:"'Times New Roman',Times,serif" } } }
+    }
+  };
+}
+function setStatus(state, msg) {
+  document.getElementById('statusDot').className = 'sdot ' + state;
+  document.getElementById('statusMsg').textContent = msg;
+  document.getElementById('spinner').style.display = state==='loading' ? 'block' : 'none';
+}
+</script>
+</body>
+</html>
