@@ -1,6 +1,8 @@
- venv/
-   __pycache__/
-   *.pyc
-   .DS_Store
-   models/*.joblib
-   .ipynb_checkpoints/
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+models/*.joblib
+.ipynb_checkpoints/
+upgrade_files/
+app.py.v2.bak
