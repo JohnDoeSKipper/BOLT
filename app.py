@@ -1,734 +1,660 @@
 """
-ESUM x RExharge - AI Energy Demand Forecaster (v3)
-
-v3 adds: Live Simulation tab with auto-replay of future data, live
-forecast-vs-actual tracking, running accuracy metrics, and periodic
-warm-start retrains.
+SAM Calculator — TNB Electricity Bill Estimator
+Peninsular Malaysia · All tariff categories A / B / C1 / C2 / D / E1 / E2
+Includes: full charge breakdown, solar NEM credit, auto-detect tariff by voltage/demand.
 """
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
+import io
 from pathlib import Path
-import time
+
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
 
 from src.data_loader import auto_load, load_csv, summarize
-from src.solar_estimator import estimate_solar_capacity_kwp, detect_has_solar
-from src.forecaster import DirectMultiStepForecaster, DEFAULT_HORIZONS
-from src.cv import expanding_window_cv, format_cv_report
-from src.simulation import (
-    initialize_simulation,
-    advance_one_tick,
-    compute_running_accuracy,
-    build_forecast_vs_actual_df,
-    split_historical_for_simulation,
+from src.tnb_tariffs import (
+    NEM_DEFAULT_RATE,
+    TARIFF_META,
+    TariffCode,
+    auto_detect_tariff,
+    calculate_bill,
+    compute_monthly_stats,
+    compute_nem_credit,
+    get_md_rate,
+    get_min_charge,
+    is_peak_hour,
 )
 
-
-st.set_page_config(page_title="RExharge Load Forecaster", page_icon="⚡", layout="wide")
+# ─── Page configuration ───────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="SAM Calculator — TNB Bill",
+    page_icon="⚡",
+    layout="wide",
+)
 
 st.markdown("""
 <style>
-.big-metric { font-size: 2.4rem; font-weight: 700; color: #00d4aa; }
-.metric-label { color: #999; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; }
-.stTabs [data-baseweb="tab-list"] { gap: 8px; }
-.live-indicator {
+/* --- Bill summary card --- */
+.bill-card {
+    border-radius: 14px;
+    padding: 26px 32px 22px;
+    color: white;
+    margin-bottom: 8px;
+}
+.bill-card-gross { background: linear-gradient(135deg, #1a3c5e 0%, #0077b6 100%); }
+.bill-card-net   { background: linear-gradient(135deg, #1a5e2e 0%, #2d9e50 100%); }
+.bill-total  { font-size: 2.8rem; font-weight: 800; letter-spacing: -1px; line-height: 1.1; }
+.bill-sub    { font-size: 0.85rem; opacity: 0.75; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 6px; }
+.tariff-pill {
     display: inline-block;
-    width: 12px; height: 12px;
-    background: #ff4444;
-    border-radius: 50%;
-    margin-right: 6px;
-    animation: pulse 1.5s infinite;
+    background: rgba(255,255,255,0.20);
+    border-radius: 20px;
+    padding: 3px 14px;
+    font-size: 0.84rem;
+    font-weight: 600;
+    margin-top: 10px;
 }
-@keyframes pulse {
-    0% { opacity: 1; }
-    50% { opacity: 0.3; }
-    100% { opacity: 1; }
+/* --- Detect badge --- */
+.detect-badge {
+    background: #e8f4fd;
+    border-left: 4px solid #0077b6;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 0.9rem;
+    margin-bottom: 12px;
 }
+/* --- Separator row in tables --- */
+.separator { color: #aaa; }
 </style>
 """, unsafe_allow_html=True)
 
-defaults = {
-    "forecaster": None, "history": None, "last_metrics": None,
-    "forecast_result": None, "update_log": [], "cv_report": None,
-    "site_name": "Demo Site",
-    "sim_state": None, "sim_running": False,
-    "sim_tick_interval_s": 1.0, "sim_last_advance_time": 0.0,
-    "sim_future_data": None,
+# ─── Session state ─────────────────────────────────────────────────────────────
+_DEFAULTS = {
+    "df": None,
+    "monthly_stats": None,
+    "auto_tariff": None,
+    "auto_reason": None,
+    "auto_stats": None,
+    "has_solar": False,
+    "interval_min": 30,
 }
-for k, v in defaults.items():
+for k, v in _DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# =================================================================== SIDEBAR
-with st.sidebar:
-    st.title("⚡ Setup")
-    st.session_state.site_name = st.text_input("Site name", value=st.session_state.site_name)
 
-    st.divider()
-    st.subheader("Solar PV Configuration")
-    solar_mode = st.radio(
-        "Does this site have solar?",
-        ["No solar", "Yes — I know the capacity", "Yes — please estimate it"],
+# ─── Utilities ─────────────────────────────────────────────────────────────────
+
+def _parse_upload(f) -> pd.DataFrame | None:
+    suf = Path(f.name).suffix.lower()
+    tmp = Path("data") / f"_upload_{f.name}"
+    tmp.parent.mkdir(exist_ok=True)
+    tmp.write_bytes(f.getvalue())
+    try:
+        return load_csv(tmp) if suf == ".csv" else auto_load(tmp)
+    except Exception as e:
+        st.error(f"Could not parse **{f.name}**: {e}")
+        return None
+
+
+def _detect_interval(df: pd.DataFrame) -> int:
+    diffs = df["timestamp"].diff().dropna().dt.total_seconds() / 60
+    m = diffs.mode()
+    return int(m.iloc[0]) if not m.empty else 30
+
+
+def _gross_card(bill: dict, label: str = ""):
+    h = label or "Gross Bill (before solar NEM credit)"
+    st.markdown(
+        f'<div class="bill-card bill-card-gross">'
+        f'<div class="bill-sub">{h}</div>'
+        f'<div class="bill-total">RM {bill["total_bill"]:,.2f}</div>'
+        f'<div class="tariff-pill">⚡ {bill["tariff_name"]}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
     )
-    manual_capacity = 0.0
-    if solar_mode == "Yes — I know the capacity":
-        manual_capacity = st.number_input("Installed capacity (kWp)",
-            min_value=0.0, max_value=5000.0, value=500.0, step=10.0)
+
+
+def _net_card(net_bill: float, nem: dict, label: str = ""):
+    h = label or "Net Bill (after solar NEM credit)"
+    st.markdown(
+        f'<div class="bill-card bill-card-net">'
+        f'<div class="bill-sub">{h}</div>'
+        f'<div class="bill-total">RM {net_bill:,.2f}</div>'
+        f'<div class="tariff-pill">☀️ NEM credit: RM {nem["nem_credit_rm"]:,.2f}'
+        f'  ({nem["export_kwh"]:,.1f} kWh × RM {nem["nem_rate_rm"]:.3f})</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+
+# ─── Sidebar ──────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.title("⚡ SAM Calculator")
+    st.caption("TNB Bill Estimator · Peninsular Malaysia")
+    st.divider()
+
+    # 1. File upload
+    st.subheader("1. Upload Energy Usage File")
+    st.caption("CSV, XLSX, or XLS — must contain `timestamp` and `kw_import` columns.")
+    uploaded = st.file_uploader(
+        "Drop load profile here", type=["csv", "xlsx", "xls"],
+        label_visibility="collapsed",
+    )
+    if uploaded:
+        df_raw = _parse_upload(uploaded)
+        if df_raw is not None:
+            intvl = _detect_interval(df_raw)
+            code, reason, astats = auto_detect_tariff(df_raw, intvl)
+            st.session_state.df            = df_raw
+            st.session_state.interval_min  = intvl
+            st.session_state.auto_tariff   = code
+            st.session_state.auto_reason   = reason
+            st.session_state.auto_stats    = astats
+            st.session_state.monthly_stats = compute_monthly_stats(df_raw, intvl)
+            st.session_state.has_solar     = bool((df_raw["kw_export"] > 0).any())
+            s = summarize(df_raw)
+            st.success(
+                f"✅ **{s['rows']:,}** readings  ·  {s['days']} days  \n"
+                f"Peak: **{s['max_kw_import']:.1f} kW**  ·  "
+                f"Solar export: {'**Yes ☀️**' if s['has_solar'] else 'None'}"
+            )
 
     st.divider()
-    st.subheader("1. Historical Data")
-    st.caption("Tip: use a CSV from `data/synthetic/` for richer training.")
-    hist_file = st.file_uploader("Upload load profile",
-        type=["xlsx", "xls", "csv"], key="hist_uploader")
+
+    # 2. Tariff
+    st.subheader("2. Tariff Category")
+    t_keys   = list(TARIFF_META.keys())
+    t_labels = [f"{k}  —  {TARIFF_META[k]['name'].split('—')[1].strip()}" for k in t_keys]
+    auto_idx = t_keys.index(st.session_state.auto_tariff) if st.session_state.auto_tariff else 0
+    use_auto = st.checkbox("Auto-detect from file", value=True)
+
+    if use_auto and st.session_state.auto_tariff:
+        selected: TariffCode = st.session_state.auto_tariff
+        st.info(f"Detected: **{selected}**  \n{TARIFF_META[selected]['voltage']}")
+    else:
+        lbl = st.selectbox("Select tariff manually", t_labels, index=auto_idx)
+        selected = t_keys[t_labels.index(lbl)]
 
     st.divider()
-    st.subheader("2. Live Update (one-shot)")
-    st.caption("Batch upload newer data. For auto-replay, use Live Simulation tab.")
-    live_file = st.file_uploader("Upload new readings",
-        type=["xlsx", "xls", "csv"], key="live_uploader")
+
+    # 3. Charges
+    st.subheader("3. Charge Settings")
+    icpt_sen = st.number_input(
+        "ICPT (sen / kWh)", min_value=-10.0, max_value=20.0, value=0.0, step=0.1, format="%.2f",
+        help="Quarterly surcharge (+) or rebate (−) set by Suruhanjaya Tenaga. 0 = exempt / not applicable.",
+    )
+
+    has_solar_flag = st.session_state.has_solar
+    nem_rate = NEM_DEFAULT_RATE
+    if has_solar_flag:
+        st.markdown("**☀️ Solar NEM Settings**")
+        nem_rate = st.number_input(
+            "NEM Buyback Rate (RM / kWh)",
+            min_value=0.0, max_value=1.0, value=NEM_DEFAULT_RATE, step=0.01, format="%.3f",
+            help="TNB NEM 3.0 default: RM 0.31/kWh. Check your NEM agreement for the exact rate.",
+        )
 
     st.divider()
     with st.expander("⚙️ Advanced"):
-        ws_rounds = st.slider("Warm-start rounds", 20, 200, 50, 10)
-        n_estimators = st.slider("Initial training rounds", 100, 500, 250, 50)
+        apply_st  = st.checkbox("Apply Service Tax (8%)", value=True,
+            help="Non-domestic only. Tariff A is always exempt. Rate raised from 6% to 8% in March 2024.")
+        apply_kb  = st.checkbox("Apply KWTBB (1.6%)", value=True,
+            help="Kumpulan Wang Tenaga Boleh Baharu — non-domestic only.")
+        intvl_ov  = st.number_input(
+            "Sampling interval (minutes)", min_value=1, max_value=60,
+            value=st.session_state.interval_min, step=1,
+        )
 
-# ================================================================== HEADER
-st.title(f"{st.session_state.site_name} — Energy Demand Forecaster")
-st.caption("Direct multi-step LightGBM with quantile bands + live-adapting online learning.")
 
-col1, col2, col3, col4 = st.columns(4)
-fc = st.session_state.forecaster
-metrics = st.session_state.last_metrics
+# ─── Page header ──────────────────────────────────────────────────────────────
+st.title("⚡ SAM Calculator — TNB Bill Estimator")
+st.caption(
+    "Upload your energy usage graph → auto-detect tariff category → "
+    "get a fully itemised TNB bill with solar NEM credit breakdown."
+)
 
-with col1:
-    st.markdown('<div class="metric-label">Status</div>', unsafe_allow_html=True)
-    if fc is None:
-        st.markdown('<div class="big-metric">—</div>', unsafe_allow_html=True)
-        st.caption("Awaiting training")
-    else:
-        st.markdown(f'<div class="big-metric">Live</div>', unsafe_allow_html=True)
-        st.caption(f"{len(fc.boosters)} models • {fc.n_train_rows:,} samples")
+# ─── No file yet ───────────────────────────────────────────────────────────────
+if st.session_state.df is None:
+    st.info("👈  Upload a load-profile file in the sidebar to begin.")
+    st.divider()
 
-with col2:
-    st.markdown('<div class="metric-label">Mean MAPE</div>', unsafe_allow_html=True)
-    if metrics:
-        st.markdown(f'<div class="big-metric">{metrics["mean_mape"]:.1f}%</div>', unsafe_allow_html=True)
-    else:
-        st.markdown('<div class="big-metric">—</div>', unsafe_allow_html=True)
+    st.subheader("📋 TNB Tariff Quick Reference (Peninsular Malaysia)")
+    st.dataframe(pd.DataFrame([
+        {"Tariff": "A",  "Category": "Domestic",             "Voltage Supply": "Low (240 V / 415 V)",  "Energy Rate": "Tiered  RM 0.218 – 0.571 / kWh", "MD (RM/kVA)": "—",     "Min Bill": "RM 3.00",   "Service Tax": "Exempt"},
+        {"Tariff": "B",  "Category": "LV Commercial",        "Voltage Supply": "Low (240 V / 415 V)",  "Energy Rate": "RM 0.435 / kWh (flat)",           "MD (RM/kVA)": "—",     "Min Bill": "RM 7.20",   "Service Tax": "8 %"},
+        {"Tariff": "C1", "Category": "MV General",           "Voltage Supply": "Medium (6.6–22 kV)",   "Energy Rate": "RM 0.365 / kWh (flat)",           "MD (RM/kVA)": "30.30", "Min Bill": "RM 600.00", "Service Tax": "8 %"},
+        {"Tariff": "C2", "Category": "MV Time-of-Use",       "Voltage Supply": "Medium (6.6–22 kV)",   "Energy Rate": "Peak 0.365 / Off-peak 0.219",     "MD (RM/kVA)": "30.30", "Min Bill": "RM 600.00", "Service Tax": "8 %"},
+        {"Tariff": "D",  "Category": "HV General",           "Voltage Supply": "High (33–132 kV)",     "Energy Rate": "RM 0.337 / kWh (flat)",           "MD (RM/kVA)": "29.60", "Min Bill": "RM 600.00", "Service Tax": "8 %"},
+        {"Tariff": "E1", "Category": "HV Peak/Off-Peak",     "Voltage Supply": "High (33–132 kV)",     "Energy Rate": "Peak 0.337 / Off-peak 0.202",     "MD (RM/kVA)": "29.60", "Min Bill": "RM 600.00", "Service Tax": "8 %"},
+        {"Tariff": "E2", "Category": "HV TOU (MD ≥ 1500 kW)","Voltage Supply": "High (33–132 kV)",    "Energy Rate": "Peak 0.337 / Off-peak 0.202",     "MD (RM/kVA)": "29.60", "Min Bill": "RM 600.00", "Service Tax": "8 %"},
+    ]), use_container_width=True, hide_index=True)
 
-with col3:
-    st.markdown('<div class="metric-label">MAPE @ 24h</div>', unsafe_allow_html=True)
-    v = metrics.get("mape_at_h24") if metrics else None
-    st.markdown(f'<div class="big-metric">{v:.1f}%</div>' if v else '<div class="big-metric">—</div>',
-                unsafe_allow_html=True)
+    st.caption(
+        "Peak hours (TOU tariffs): 08:00–22:00, Monday–Saturday.  "
+        "KWTBB 1.6% and Service Tax 8% apply to non-domestic tariffs.  "
+        "Solar NEM credit applied after all charges."
+    )
+    st.stop()
 
-with col4:
-    st.markdown('<div class="metric-label">Updates</div>', unsafe_allow_html=True)
-    total = len(st.session_state.update_log)
-    if st.session_state.sim_state is not None:
-        total += len(st.session_state.sim_state.retrain_log)
-    st.markdown(f'<div class="big-metric">{total}</div>', unsafe_allow_html=True)
 
-# ================================================================ TABS
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📥 Setup & Train", "📈 Live Forecast",
-    "🎬 Live Simulation", "🧪 Cross-Validation", "🔬 Diagnostics"
+# ─── Tabs ──────────────────────────────────────────────────────────────────────
+df      = st.session_state.df
+mstats  = st.session_state.monthly_stats
+intvl   = intvl_ov
+is_dom  = selected == "A"
+use_st  = apply_st and not is_dom
+use_kb  = apply_kb and not is_dom
+
+tab_usage, tab_bill, tab_monthly, tab_ref = st.tabs([
+    "📊 Energy Usage",
+    "🧾 Bill Breakdown",
+    "📅 Monthly Report",
+    "ℹ️ Tariff Reference",
 ])
 
-# ======================================================= TAB 1: SETUP
-with tab1:
-    st.header("Step 1 — Train the initial model")
-    if hist_file is not None:
-        tmp = Path("data") / f"_upload_{hist_file.name}"
-        tmp.parent.mkdir(exist_ok=True)
-        tmp.write_bytes(hist_file.getvalue())
-        try:
-            df = load_csv(tmp) if tmp.suffix.lower() == ".csv" else auto_load(tmp)
-        except Exception as e:
-            st.error(f"Could not parse: {e}")
-            st.stop()
 
-        s = summarize(df)
-        st.success(f"✅ Loaded **{s['rows']:,}** samples ({s['days']} days).")
-        cA, cB, cC = st.columns(3)
-        cA.metric("Period", f"{s['start'].date()} → {s['end'].date()}")
-        cB.metric("Mean kW", f"{s['mean_kw_import']:.0f}")
-        cC.metric("Peak kW", f"{s['max_kw_import']:.0f}")
+# ══════════════════════════ TAB 1 — ENERGY USAGE ══════════════════════════════
+with tab_usage:
+    st.header("Energy Usage Overview")
 
-        if solar_mode == "Yes — please estimate it":
-            has, why = detect_has_solar(df)
-            est = estimate_solar_capacity_kwp(df)
-            st.info(f"**Solar:** {'✅' if has else '❌'} {why} • **Estimate:** {est['capacity_kwp']:.0f} kWp")
-            capacity = est["capacity_kwp"]
-        elif solar_mode == "Yes — I know the capacity":
-            capacity = manual_capacity
-            st.info(f"Using **{capacity:.0f} kWp**")
+    total_kwh_all = float(df["kw_import"].sum() * (intvl / 60))
+    peak_kw_all   = float(df["kw_import"].max())
+    avg_kw_all    = float(df["kw_import"].mean())
+    export_kwh_all = float(df["kw_export"].sum() * (intvl / 60))
+    span_days     = max((df["timestamp"].max() - df["timestamp"].min()).days, 1)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Total kWh Imported",    f"{total_kwh_all:,.1f} kWh")
+    c2.metric("Peak Demand",           f"{peak_kw_all:,.1f} kW")
+    c3.metric("Average Demand",        f"{avg_kw_all:,.1f} kW")
+    c4.metric("Solar Export",          f"{export_kwh_all:,.1f} kWh" if has_solar_flag else "—")
+    c5.metric("Data Span",             f"{span_days} days")
+
+    # Auto-detect result
+    if st.session_state.auto_tariff:
+        code_d = st.session_state.auto_tariff
+        meta_d = TARIFF_META[code_d]
+        st.markdown(
+            f'<div class="detect-badge">'
+            f'🔍 <strong>Auto-detected: {code_d} — {meta_d["name"].split("—")[1].strip()}</strong><br>'
+            f'<span style="color:#555">{meta_d["voltage"]}  ·  Typical demand: {meta_d["typical_demand"]}</span><br>'
+            f'<em>{st.session_state.auto_reason}</em>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+
+    # ── Load profile chart ────────────────────────────────────────────────────
+    st.subheader("Load Profile — Grid Import")
+    is_tou = TARIFF_META[selected]["tou"]
+    fig = go.Figure()
+
+    if is_tou:
+        df_p = df.copy()
+        df_p["is_peak"] = df_p["timestamp"].apply(is_peak_hour)
+        fig.add_trace(go.Scatter(
+            x=df_p.loc[~df_p["is_peak"], "timestamp"],
+            y=df_p.loc[~df_p["is_peak"], "kw_import"],
+            mode="lines", name="Off-Peak", line=dict(color="#00b4d8", width=1.2)))
+        fig.add_trace(go.Scatter(
+            x=df_p.loc[df_p["is_peak"], "timestamp"],
+            y=df_p.loc[df_p["is_peak"], "kw_import"],
+            mode="lines", name="Peak  (08:00–22:00, Mon–Sat)", line=dict(color="#ff6b35", width=1.2)))
+    else:
+        fig.add_trace(go.Scatter(
+            x=df["timestamp"], y=df["kw_import"],
+            mode="lines", name="kW Import", line=dict(color="#0077b6", width=1.5)))
+
+    # Mark absolute peak
+    pi = df["kw_import"].idxmax()
+    fig.add_trace(go.Scatter(
+        x=[df.loc[pi, "timestamp"]], y=[peak_kw_all],
+        mode="markers+text",
+        marker=dict(color="#e63946", size=13, symbol="star"),
+        text=[f"Peak\n{peak_kw_all:.1f} kW"],
+        textposition="top center",
+        name="Peak Demand",
+        showlegend=False,
+    ))
+
+    fig.update_layout(
+        template="plotly_white", height=400,
+        xaxis_title="Date / Time", yaxis_title="Power  (kW)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        hovermode="x unified", margin=dict(l=0, r=0, t=30, b=0),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── Solar export chart ────────────────────────────────────────────────────
+    if has_solar_flag:
+        st.subheader("☀️ Solar Export (kW fed back to TNB grid)")
+        fig_sol = go.Figure()
+        fig_sol.add_trace(go.Scatter(
+            x=df["timestamp"], y=df["kw_import"],
+            name="Grid Import  (kW)", line=dict(color="#0077b6", width=1.4)))
+        fig_sol.add_trace(go.Scatter(
+            x=df["timestamp"], y=df["kw_export"],
+            name="Solar Export  (kW)", line=dict(color="#f4a261", width=1.4),
+            fill="tozeroy", fillcolor="rgba(244,162,97,0.15)"))
+        fig_sol.update_layout(
+            template="plotly_white", height=300,
+            yaxis_title="kW",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+            hovermode="x unified", margin=dict(l=0, r=0, t=20, b=0),
+        )
+        st.plotly_chart(fig_sol, use_container_width=True)
+
+    # ── Heatmap ───────────────────────────────────────────────────────────────
+    st.subheader("Average Demand Heatmap  (Hour × Day of Week)")
+    df_hm = df.copy()
+    df_hm["hour"] = df_hm["timestamp"].dt.hour
+    df_hm["dow"]  = df_hm["timestamp"].dt.day_name()
+    dow_ord = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+    pivot = (df_hm.groupby(["dow","hour"])["kw_import"]
+               .mean().unstack("hour").reindex(dow_ord))
+    fig_hm = px.imshow(
+        pivot, color_continuous_scale="Blues",
+        labels=dict(x="Hour of Day", y="Day", color="Avg kW"),
+        aspect="auto",
+    )
+    fig_hm.update_layout(template="plotly_white", height=280,
+                         margin=dict(l=0, r=0, t=10, b=0))
+    st.plotly_chart(fig_hm, use_container_width=True)
+
+
+# ══════════════════════════ TAB 2 — BILL BREAKDOWN ════════════════════════════
+with tab_bill:
+    st.header("TNB Bill Breakdown")
+
+    if mstats is None or len(mstats) == 0:
+        st.warning("No data to calculate.")
+    else:
+        # Month picker
+        months = [str(m) for m in mstats["month"]]
+        chosen = (st.selectbox("Billing month", months, index=len(months) - 1)
+                  if len(months) > 1 else months[0])
+
+        row    = mstats[mstats["month"].astype(str) == chosen].iloc[0]
+        t_kwh  = float(row["total_kwh"])
+        p_kwh  = float(row["peak_kwh"])
+        o_kwh  = float(row["offpeak_kwh"])
+        md_kva = float(row["max_demand_kva"])
+        ex_kwh = float(row["export_kwh"])
+
+        bill = calculate_bill(
+            tariff=selected,
+            monthly_kwh=t_kwh, peak_kwh=p_kwh, offpeak_kwh=o_kwh,
+            max_demand_kva=md_kva, icpt_sen_per_kwh=icpt_sen,
+            apply_service_tax=use_st, apply_kwtbb=use_kb,
+        )
+
+        # NEM credit
+        has_export = ex_kwh > 0
+        nem = compute_nem_credit(ex_kwh, nem_rate) if has_export else None
+        net_bill_amt = round(max(0.0, bill["total_bill"] - (nem["nem_credit_rm"] if nem else 0.0)), 2)
+
+        # ── Bill summary cards ────────────────────────────────────────────────
+        if has_export:
+            col_g, col_n = st.columns(2)
+            with col_g:
+                _gross_card(bill, f"Gross Bill — {chosen}  (before solar credit)")
+            with col_n:
+                _net_card(net_bill_amt, nem, f"Net Bill — {chosen}  (after solar NEM credit)")
         else:
-            capacity = 0.0
+            _gross_card(bill, f"Total Bill — {chosen}")
+
+        # Input summary
+        with st.expander("📥 Inputs used for this calculation"):
+            ci1, ci2, ci3, ci4 = st.columns(4)
+            ci1.metric("Total kWh", f"{t_kwh:,.1f}")
+            ci2.metric("Peak kWh",  f"{p_kwh:,.1f}")
+            ci3.metric("Off-Peak",  f"{o_kwh:,.1f}")
+            ci4.metric("Max Demand",f"{md_kva:.1f} kVA")
+            if has_export:
+                st.metric("Solar Export", f"{ex_kwh:,.1f} kWh")
 
         st.divider()
-        st.subheader("Reserve data for Live Simulation (recommended)")
-        reserve_sim = st.checkbox(
-            "Split this dataset — train on past, simulate on future",
-            value=True,
-        )
-        train_frac = 0.7
-        if reserve_sim:
-            train_frac = st.slider("Fraction for training", 0.3, 0.95, 0.7, 0.05)
-            pt, pf = split_historical_for_simulation(df, train_fraction=train_frac)
-            cA, cB = st.columns(2)
-            cA.metric("Training rows", f"{len(pt):,}")
-            cB.metric("Simulation rows", f"{len(pf):,}")
-            st.caption(
-                f"Train cutoff: {pt['timestamp'].max()}  →  "
-                f"Sim starts: {pf['timestamp'].min()}"
-            )
 
-        if st.button("🚀 Train Model", type="primary", use_container_width=True):
-            if reserve_sim:
-                training_df, future_df = split_historical_for_simulation(df, train_fraction=train_frac)
-                st.session_state.sim_future_data = future_df
-            else:
-                training_df = df
-                st.session_state.sim_future_data = None
+        # ── Itemised charges ──────────────────────────────────────────────────
+        st.subheader("Itemised Charges")
 
-            t0 = time.time()
-            with st.spinner(f"Training {len(DEFAULT_HORIZONS) * 3} quantile models…"):
-                forecaster = DirectMultiStepForecaster(capacity_kwp=capacity, n_estimators=n_estimators)
-                m = forecaster.fit(training_df)
-                st.session_state.forecaster = forecaster
-                st.session_state.history = training_df
-                st.session_state.last_metrics = m
-                st.session_state.forecast_result = forecaster.forecast(output_steps=48)
-                st.session_state.update_log.append({
-                    "time": pd.Timestamp.now(), "action": "Initial fit",
-                    "added_rows": len(training_df), "mean_mape": m["mean_mape"],
-                    "duration_s": round(time.time() - t0, 1),
-                })
-            st.session_state.sim_state = None
-            st.session_state.sim_running = False
+        if bill["blocks"]:
+            st.markdown("**Energy Charge Breakdown**")
+            st.dataframe(pd.DataFrame(bill["blocks"]), use_container_width=True, hide_index=True)
 
-            msg = f"✅ Trained {m['n_models_trained']} models in {time.time()-t0:.1f}s. Mean MAPE = {m['mean_mape']:.2f}%."
-            if reserve_sim:
-                msg += f" {len(future_df):,} rows reserved for Live Simulation."
-            st.success(msg)
-            st.rerun()
-    else:
-        st.info("⬅️ Upload a load profile in the sidebar to begin.")
+        st.markdown("**Full Charge Summary**")
+        md_r = get_md_rate(selected)
+        rows: list[dict] = [{"Charge Component": "Energy Charges",
+                              "Amount (RM)": f"{bill['energy_charge']:,.2f}"}]
+        if bill["md_charge"] > 0:
+            rows.append({"Charge Component": f"Maximum Demand Charge  ({md_kva:.1f} kVA × RM {md_r:.2f}/kVA)",
+                         "Amount (RM)": f"{bill['md_charge']:,.2f}"})
+        if bill["icpt_charge"] != 0:
+            sign = "Surcharge" if bill["icpt_charge"] >= 0 else "Rebate"
+            rows.append({"Charge Component": f"ICPT {sign}  ({icpt_sen:+.2f} sen/kWh × {t_kwh:,.1f} kWh)",
+                         "Amount (RM)": f"{bill['icpt_charge']:,.2f}"})
+        if bill["kwtbb_charge"] > 0:
+            rows.append({"Charge Component": "KWTBB Levy  (1.6% × energy charges)",
+                         "Amount (RM)": f"{bill['kwtbb_charge']:,.2f}"})
+        if bill["service_tax"] > 0:
+            rows.append({"Charge Component": "Service Tax  (8% × energy + MD + KWTBB)",
+                         "Amount (RM)": f"{bill['service_tax']:,.2f}"})
 
-# ======================================================= TAB 2: LIVE FORECAST
-with tab2:
-    st.header("Step 2 — Forecast & Live Adaptation (batch)")
-    if fc is None:
-        st.warning("Train a model in Setup first.")
-    else:
-        if live_file is not None:
-            tmp = Path("data") / f"_live_{live_file.name}"
-            tmp.parent.mkdir(exist_ok=True)
-            tmp.write_bytes(live_file.getvalue())
-            try:
-                new_df = load_csv(tmp) if tmp.suffix.lower() == ".csv" else auto_load(tmp)
-            except Exception as e:
-                st.error(f"Could not parse: {e}")
-                st.stop()
+        rows.append({"Charge Component": "─" * 48, "Amount (RM)": "─" * 14})
+        rows.append({"Charge Component": "GROSS BILL TOTAL",
+                     "Amount (RM)": f"{bill['total_bill']:,.2f}"})
 
-            cutoff = fc.history["timestamp"].max()
-            new_only = new_df[new_df["timestamp"] > cutoff]
+        if has_export and nem:
+            rows.append({"Charge Component": "─" * 48, "Amount (RM)": "─" * 14})
+            rows.append({"Charge Component":
+                         f"☀️ Solar NEM Credit  ({ex_kwh:,.1f} kWh × RM {nem['nem_rate_rm']:.3f}/kWh)"
+                         "  [applied after all charges]",
+                         "Amount (RM)": f"− {nem['nem_credit_rm']:,.2f}"})
+            rows.append({"Charge Component": "─" * 48, "Amount (RM)": "─" * 14})
+            rows.append({"Charge Component": "NET BILL (after solar NEM credit)",
+                         "Amount (RM)": f"{net_bill_amt:,.2f}"})
 
-            if len(new_only) == 0:
-                st.warning(f"No new data (latest history: {cutoff}).")
-            else:
-                t0 = time.time()
-                with st.spinner(f"Warm-starting on {len(new_only)} new samples…"):
-                    m = fc.update(new_only, n_rounds=ws_rounds)
-                    st.session_state.last_metrics = m
-                    st.session_state.forecast_result = fc.forecast(output_steps=48)
-                    st.session_state.update_log.append({
-                        "time": pd.Timestamp.now(), "action": "Warm-start",
-                        "added_rows": len(new_only), "mean_mape": m["mean_mape"],
-                        "duration_s": round(time.time() - t0, 1),
-                    })
-                st.success(f"✅ Warm-started in {time.time()-t0:.1f}s. New MAPE = {m['mean_mape']:.2f}%.")
+        if bill["minimum_charge_applied"]:
+            rows.append({"Charge Component": f"⚠️  Minimum monthly charge of RM {get_min_charge(selected):.2f} applied",
+                         "Amount (RM)": ""})
 
-        result = st.session_state.forecast_result
-        if result is not None:
-            hist = fc.history.tail(48 * 3)
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=hist["timestamp"], y=hist["kw_import"],
-                name="Actual", line=dict(color="#888", width=2)))
-            fig.add_trace(go.Scatter(
-                x=list(result.timestamps) + list(result.timestamps[::-1]),
-                y=list(result.p90) + list(result.p10[::-1]),
-                fill="toself", fillcolor="rgba(0,212,170,0.15)",
-                line=dict(color="rgba(0,0,0,0)"), hoverinfo="skip",
-                name="80% confidence band",
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        for note in bill["notes"]:
+            st.caption(f"ℹ️  {note}")
+
+        st.divider()
+
+        # ── Charts ────────────────────────────────────────────────────────────
+        col_pie, col_eff = st.columns(2)
+
+        with col_pie:
+            st.subheader("Bill Composition")
+            pie_data = [
+                ("Energy Charges",    bill["energy_charge"]),
+                ("Max Demand Charge", bill["md_charge"]),
+                ("ICPT",              bill["icpt_charge"]),
+                ("KWTBB Levy",        bill["kwtbb_charge"]),
+                ("Service Tax",       bill["service_tax"]),
+            ]
+            if has_export and nem:
+                pie_data.append(("Solar NEM Credit (−)", -nem["nem_credit_rm"]))
+
+            labels = [l for l, v in pie_data if abs(v) > 0]
+            values = [abs(v) for _, v in pie_data if abs(v) > 0]
+            colors = ["#003566","#0077b6","#00b4d8","#90e0ef","#caf0f8","#2d9e50"]
+
+            fig_pie = go.Figure(go.Pie(
+                labels=labels, values=values, hole=0.42,
+                marker_colors=colors[:len(labels)],
+                textinfo="label+percent",
             ))
-            fig.add_trace(go.Scatter(x=result.timestamps, y=result.median,
-                name="Forecast (median)", line=dict(color="#00d4aa", width=3)))
-            pi = int(np.argmax(result.median))
-            fig.add_trace(go.Scatter(x=[result.timestamps[pi]], y=[result.median[pi]],
-                mode="markers+text", marker=dict(color="#ff6b6b", size=14, symbol="star"),
-                text=[f"PEAK<br>{result.median[pi]:.0f} kW"], textposition="top center",
-                name="Predicted Peak"))
-            fig.update_layout(title=f"24-hour Forecast — {st.session_state.site_name}",
-                xaxis_title="Time", yaxis_title="kW Import",
-                template="plotly_dark", height=540, hovermode="x unified",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
-            st.plotly_chart(fig, use_container_width=True)
+            fig_pie.update_layout(template="plotly_white", height=340,
+                showlegend=False, margin=dict(l=0,r=0,t=10,b=0))
+            st.plotly_chart(fig_pie, use_container_width=True)
 
-            peaks = fc.detect_peaks(result, top_n=3)
-            c1, c2 = st.columns([2, 1])
-            with c1:
-                st.subheader("🔥 Top 3 Predicted Peaks")
-                pp = peaks.copy()
-                pp["timestamp"] = pp["timestamp"].dt.strftime("%a %d %b, %H:%M")
-                for col in ["predicted_kw", "lower_bound_kw", "upper_bound_kw"]:
-                    pp[col] = pp[col].round(0).astype(int)
-                st.dataframe(pp, use_container_width=True, hide_index=True)
-            with c2:
-                mp = float(result.median.max())
-                st.metric("Forecast Peak", f"{mp:.0f} kW")
-                st.metric("Est. Monthly MD Charge", f"RM {mp * 97.06:,.0f}",
-                    delta=f"+RM {mp * (97.06 - 30.30):,.0f} vs old tariff",
-                    delta_color="inverse")
+        with col_eff:
+            st.subheader("Key Metrics")
+            if t_kwh > 0:
+                eff_gross = bill["total_bill"] / t_kwh
+                eff_net   = net_bill_amt / t_kwh
+                st.metric("Effective Rate (gross)", f"RM {eff_gross:.4f} / kWh")
+                if has_export:
+                    st.metric("Effective Rate (net)",   f"RM {eff_net:.4f} / kWh",
+                        delta=f"−RM {eff_gross - eff_net:.4f} savings from solar")
 
-# ======================================================= TAB 3: LIVE SIMULATION
-with tab3:
-    st.header("🎬 Live Data Simulation")
-    st.caption(
-        "Auto-replays 'future' readings one at a time, comparing forecasts against actuals "
-        "live, with periodic warm-start retrains."
-    )
+            if selected == "A" and bill["blocks"]:
+                st.markdown("**Tariff A — Block Rates Used**")
+                bn = [b["Block"] for b in bill["blocks"]]
+                br = [b["Rate (RM/kWh)"] for b in bill["blocks"]]
+                bk = [b["kWh"] for b in bill["blocks"]]
+                fig_blk = go.Figure(go.Bar(
+                    x=[f"{n}\n({k:.0f} kWh)" for n, k in zip(bn, bk)],
+                    y=br,
+                    marker_color=["#003566","#0077b6","#0096c7","#00b4d8","#48cae4"][:len(br)],
+                    text=[f"RM {r}" for r in br], textposition="outside",
+                ))
+                fig_blk.update_layout(template="plotly_white", height=270,
+                    yaxis_title="RM / kWh", margin=dict(l=0,r=0,t=10,b=0))
+                st.plotly_chart(fig_blk, use_container_width=True)
 
-    if fc is None:
-        st.warning("Train a model in Setup first.")
+
+# ══════════════════════════ TAB 3 — MONTHLY REPORT ════════════════════════════
+with tab_monthly:
+    st.header("Monthly Bill Report")
+
+    if mstats is None or len(mstats) == 0:
+        st.warning("No data available.")
     else:
-        sim_state = st.session_state.sim_state
-
-        # ---------------- CONFIGURATION PANEL ----------------
-        if sim_state is None:
-            st.subheader("Configure Simulation")
-
-            # --- Data source selection ---
-            # Always let the user upload a separate test file (e.g. April 2022 data
-            # when the model was trained on March 2021–2022). Uploading overrides
-            # whatever was reserved during training.
-            future_df = st.session_state.sim_future_data
-
-            sim_upload = st.file_uploader(
-                "Upload separate test dataset (optional — overrides any reserved split)",
-                type=["xlsx", "xls", "csv"], key="sim_upload",
-                help="Upload data the model has never seen, e.g. April 2022 if you "
-                     "trained on March 2021–2022. All rows in the file are used as-is.",
+        records: list[dict] = []
+        for _, row in mstats.iterrows():
+            b = calculate_bill(
+                tariff=selected,
+                monthly_kwh=float(row["total_kwh"]),
+                peak_kwh=float(row["peak_kwh"]),
+                offpeak_kwh=float(row["offpeak_kwh"]),
+                max_demand_kva=float(row["max_demand_kva"]),
+                icpt_sen_per_kwh=icpt_sen,
+                apply_service_tax=use_st, apply_kwtbb=use_kb,
             )
-            if sim_upload is not None:
-                tmp = Path("data") / f"_sim_{sim_upload.name}"
-                tmp.parent.mkdir(exist_ok=True)
-                tmp.write_bytes(sim_upload.getvalue())
-                try:
-                    fd = load_csv(tmp) if tmp.suffix.lower() == ".csv" else auto_load(tmp)
-                    fd = fd.sort_values("timestamp").reset_index(drop=True)
+            ex  = float(row["export_kwh"])
+            nem_m = compute_nem_credit(ex, nem_rate) if ex > 0 else {"nem_credit_rm": 0.0}
+            net = round(max(0.0, b["total_bill"] - nem_m["nem_credit_rm"]), 2)
 
-                    # Diagnostic: catch the silent-zero problem immediately
-                    if fd["kw_import"].max() == 0:
-                        # Peek at raw column names to help the user diagnose
-                        try:
-                            if tmp.suffix.lower() == ".csv":
-                                import csv as _csv
-                                raw_cols = next(_csv.reader(open(tmp, encoding="utf-8-sig")))
-                            else:
-                                raw_cols = list(pd.read_excel(tmp, header=None, nrows=3).iloc[0].astype(str))
-                        except Exception:
-                            raw_cols = ["(could not read raw columns)"]
-                        st.error(
-                            "❌ `kw_import` is all zeros — the file loaded but the power "
-                            "column wasn't recognised.\n\n"
-                            f"**Raw column names found:** `{raw_cols}`\n\n"
-                            "The loader expects a column whose name contains **'kW Import'** "
-                            "(or equivalent after lowercasing). If your file uses a different "
-                            "name, rename it to `kw_import` before uploading."
-                        )
-                        future_df = None
-                    else:
-                        # Warn about overlap with training data (informational only)
-                        cutoff = fc.history["timestamp"].max()
-                        overlap_n = int((fd["timestamp"] <= cutoff).sum())
-                        if overlap_n > 0:
-                            st.warning(
-                                f"⚠️ {overlap_n} rows overlap with training data "
-                                f"(before {cutoff.date()}). The model already saw these — "
-                                "consider uploading only truly unseen data for a fair test."
-                            )
-                        future_df = fd
-                        st.success(
-                            f"✅ Loaded **{len(future_df):,}** rows "
-                            f"({future_df['timestamp'].min().date()} → "
-                            f"{future_df['timestamp'].max().date()}) — "
-                            f"kW import range: {future_df['kw_import'].min():.0f}–"
-                            f"{future_df['kw_import'].max():.0f} kW."
-                        )
-                        with st.expander("🔍 Data preview (first 5 rows)"):
-                            st.dataframe(future_df.head(5), use_container_width=True)
-                except Exception as e:
-                    st.error(f"Could not parse: {e}")
-                    future_df = None
-            elif future_df is not None:
-                st.success(
-                    f"✅ Using **{len(future_df):,}** rows reserved during training "
-                    f"({future_df['timestamp'].min().date()} → "
-                    f"{future_df['timestamp'].max().date()})."
-                )
-            else:
-                st.info(
-                    "No simulation data yet. Either upload a test file above, "
-                    "or go back to Setup and train with 'Split this dataset' checked."
-                )
+            records.append({
+                "Month":               str(row["month"]),
+                "Total kWh":           round(float(row["total_kwh"]), 1),
+                "Peak kWh":            round(float(row["peak_kwh"]), 1),
+                "Off-Peak kWh":        round(float(row["offpeak_kwh"]), 1),
+                "Max Demand (kVA)":    round(float(row["max_demand_kva"]), 1),
+                "Export kWh":          round(ex, 1),
+                "Energy Charge (RM)":  round(b["energy_charge"], 2),
+                "MD Charge (RM)":      round(b["md_charge"], 2),
+                "ICPT (RM)":           round(b["icpt_charge"], 2),
+                "KWTBB (RM)":          round(b["kwtbb_charge"], 2),
+                "Service Tax (RM)":    round(b["service_tax"], 2),
+                "Gross Bill (RM)":     round(b["total_bill"], 2),
+                "NEM Credit (RM)":     round(nem_m["nem_credit_rm"], 2),
+                "Net Bill (RM)":       net,
+            })
 
-            if future_df is not None and len(future_df) > 0:
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    sim_speed = st.select_slider(
-                        "Playback speed",
-                        options=["0.3s (fast)", "0.6s", "1.0s (normal)", "2.0s", "3.0s (slow)"],
-                        value="1.0s (normal)",
-                    )
-                    sim_interval = float(sim_speed.split("s")[0])
-                with c2:
-                    retrain_every = st.number_input("Retrain every N readings",
-                        min_value=2, max_value=96, value=6, step=2,
-                        help="6 = every 3 hours of simulated time (more frequent = faster adaptation)")
-                with c3:
-                    sim_ws_rounds = st.number_input("Warm-start rounds",
-                        min_value=10, max_value=200, value=50, step=10,
-                        help="Extra boosting rounds per retrain. Higher = stronger adaptation.")
+        rdf = pd.DataFrame(records)
+        st.dataframe(rdf, use_container_width=True, hide_index=True)
 
-                max_ticks = st.slider("Max simulation length (readings)",
-                    min_value=48, max_value=min(len(future_df), 2016),
-                    value=min(len(future_df), 336),  # default 1 week
-                    step=48,
-                    help="48 = 1 day, 336 = 1 week, 2016 = 6 weeks")
+        # Trend chart
+        fig_tr = go.Figure()
+        fig_tr.add_trace(go.Bar(
+            x=rdf["Month"], y=rdf["Gross Bill (RM)"],
+            name="Gross Bill (RM)", marker_color="#0077b6",
+            text=rdf["Gross Bill (RM)"].apply(lambda v: f"RM {v:,.0f}"),
+            textposition="outside", yaxis="y",
+        ))
+        if has_solar_flag and rdf["NEM Credit (RM)"].sum() > 0:
+            fig_tr.add_trace(go.Bar(
+                x=rdf["Month"], y=rdf["Net Bill (RM)"],
+                name="Net Bill after NEM (RM)", marker_color="#2d9e50",
+                yaxis="y",
+            ))
+        fig_tr.add_trace(go.Scatter(
+            x=rdf["Month"], y=rdf["Total kWh"],
+            name="Total kWh", line=dict(color="#f4a261", width=2.5, dash="dot"),
+            mode="lines+markers", yaxis="y2",
+        ))
+        fig_tr.update_layout(
+            template="plotly_white", height=420, barmode="overlay",
+            yaxis=dict(title="Bill (RM)", showgrid=False),
+            yaxis2=dict(title="kWh", overlaying="y", side="right"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+            hovermode="x unified", margin=dict(l=0,r=0,t=20,b=0),
+        )
+        st.plotly_chart(fig_tr, use_container_width=True)
 
-                if st.button("▶️ Initialize Simulation", type="primary", use_container_width=True):
-                    subset = future_df.iloc[:max_ticks].copy()
-                    st.session_state.sim_state = initialize_simulation(
-                        forecaster=fc, future_data=subset,
-                        retrain_every_n=int(retrain_every),
-                        tick_interval_s=sim_interval,
-                        warm_start_rounds=int(sim_ws_rounds),
-                    )
-                    st.session_state.sim_tick_interval_s = sim_interval
-                    st.session_state.sim_running = False
-                    st.session_state.sim_last_advance_time = 0.0
-                    st.rerun()
+        # Totals
+        cs1, cs2, cs3, cs4 = st.columns(4)
+        cs1.metric("Total Spend (gross)",   f"RM {rdf['Gross Bill (RM)'].sum():,.2f}")
+        cs2.metric("Total NEM Savings",     f"RM {rdf['NEM Credit (RM)'].sum():,.2f}")
+        cs3.metric("Total Spend (net)",     f"RM {rdf['Net Bill (RM)'].sum():,.2f}")
+        cs4.metric("Avg Monthly (net)",     f"RM {rdf['Net Bill (RM)'].mean():,.2f}")
 
-        # ---------------- RUNNING SIMULATION ----------------
-        else:
-            is_finished = sim_state.is_finished
-            is_running = st.session_state.sim_running
+        # Download
+        buf = io.StringIO()
+        rdf.to_csv(buf, index=False)
+        st.download_button(
+            "⬇️  Download Monthly Report (CSV)",
+            data=buf.getvalue(),
+            file_name="sam_calculator_monthly_report.csv",
+            mime="text/csv",
+        )
 
-            # Control bar
-            ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([1, 1, 1, 3])
-            with ctrl1:
-                play_label = "⏸️ Pause" if is_running else "▶️ Play"
-                if st.button(play_label, use_container_width=True, disabled=is_finished):
-                    st.session_state.sim_running = not is_running
-                    st.session_state.sim_last_advance_time = time.time()
-                    st.rerun()
-            with ctrl2:
-                if st.button("⏭️ Step", use_container_width=True,
-                             disabled=(is_running or is_finished)):
-                    advance_one_tick(fc, sim_state)
-                    st.rerun()
-            with ctrl3:
-                if st.button("🔁 Reset", use_container_width=True):
-                    st.session_state.sim_state = None
-                    st.session_state.sim_running = False
-                    st.rerun()
-            with ctrl4:
-                if is_finished:
-                    st.markdown("✅ **Simulation finished**")
-                elif is_running:
-                    st.markdown('<span class="live-indicator"></span>**LIVE**',
-                        unsafe_allow_html=True)
-                else:
-                    st.markdown("⏸️ Paused")
 
-            # Progress
-            st.progress(sim_state.progress,
-                text=f"Tick {sim_state.tick} / {sim_state.total_ticks}  "
-                     f"({sim_state.progress*100:.1f}%)")
+# ══════════════════════════ TAB 4 — TARIFF REFERENCE ══════════════════════════
+with tab_ref:
+    st.header("TNB Tariff Reference — Peninsular Malaysia")
+    st.caption("Official TNB tariff schedule, revised 2014 and updated 2022.")
 
-            # Live metrics
-            acc = compute_running_accuracy(sim_state)
-            m1, m2, m3, m4, m5 = st.columns(5)
+    # Tariff A
+    st.subheader("Tariff A — Domestic (Progressive / Tiered)")
+    st.dataframe(pd.DataFrame([
+        {"Block": "First 200 kWh",              "Rate (RM/kWh)": 0.218},
+        {"Block": "Next 100 kWh  (201 – 300)",  "Rate (RM/kWh)": 0.334},
+        {"Block": "Next 300 kWh  (301 – 600)",  "Rate (RM/kWh)": 0.516},
+        {"Block": "Next 300 kWh  (601 – 900)",  "Rate (RM/kWh)": 0.546},
+        {"Block": "Remaining kWh (> 900)",       "Rate (RM/kWh)": 0.571},
+    ]), use_container_width=True, hide_index=True)
+    st.caption("Min monthly: RM 3.00 · Service Tax: exempt (domestic) · ICPT: generally exempt for domestic.")
 
-            with m1:
-                st.markdown('<div class="metric-label">Simulated time</div>', unsafe_allow_html=True)
-                revealed = sim_state.revealed_data()
-                if len(revealed) > 0:
-                    cur_ts = revealed["timestamp"].iloc[-1]
-                    st.markdown(f'<div class="big-metric" style="font-size: 1.4rem;">'
-                                f'{cur_ts.strftime("%a %H:%M")}</div>', unsafe_allow_html=True)
-                    st.caption(cur_ts.strftime("%d %b %Y"))
-                else:
-                    st.markdown('<div class="big-metric">—</div>', unsafe_allow_html=True)
+    # Commercial / Industrial
+    st.subheader("Commercial & Industrial Tariffs")
+    st.dataframe(pd.DataFrame([
+        {"Tariff":"B",  "Voltage":"LV  (< 1 kV)",      "Flat Rate":0.435, "Peak Rate":"—",  "Off-Peak":"—",   "MD Rate (RM/kW)":"—",    "Min Bill":"RM 7.20",   "ST":"8%","KWTBB":"1.6%"},
+        {"Tariff":"C1", "Voltage":"MV  (6.6–22 kV)",   "Flat Rate":0.365, "Peak Rate":"—",  "Off-Peak":"—",   "MD Rate (RM/kW)":"30.30","Min Bill":"RM 600.00", "ST":"8%","KWTBB":"1.6%"},
+        {"Tariff":"C2", "Voltage":"MV  (6.6–22 kV)",   "Flat Rate":"TOU", "Peak Rate":0.365,"Off-Peak":0.219, "MD Rate (RM/kW)":"30.30","Min Bill":"RM 600.00", "ST":"8%","KWTBB":"1.6%"},
+        {"Tariff":"D",  "Voltage":"HV  (33–132 kV)",   "Flat Rate":0.337, "Peak Rate":"—",  "Off-Peak":"—",   "MD Rate (RM/kW)":"29.60","Min Bill":"RM 600.00", "ST":"8%","KWTBB":"1.6%"},
+        {"Tariff":"E1", "Voltage":"HV  (33–132 kV)",   "Flat Rate":"TOU", "Peak Rate":0.337,"Off-Peak":0.202, "MD Rate (RM/kW)":"29.60","Min Bill":"RM 600.00", "ST":"8%","KWTBB":"1.6%"},
+        {"Tariff":"E2", "Voltage":"HV  (33–132 kV)",   "Flat Rate":"TOU", "Peak Rate":0.337,"Off-Peak":0.202, "MD Rate (RM/kW)":"29.60","Min Bill":"RM 600.00", "ST":"8%","KWTBB":"1.6%"},
+    ]), use_container_width=True, hide_index=True)
 
-            with m2:
-                st.markdown('<div class="metric-label">Live MAPE</div>', unsafe_allow_html=True)
-                if acc["overall_mape"] is not None:
-                    st.markdown(f'<div class="big-metric">{acc["overall_mape"]:.1f}%</div>',
-                        unsafe_allow_html=True)
-                    st.caption(f"{acc['n_verified']} verified")
-                else:
-                    st.markdown('<div class="big-metric">—</div>', unsafe_allow_html=True)
+    # Other charges
+    st.subheader("Additional Charges")
+    st.dataframe(pd.DataFrame([
+        {"Charge":"ICPT",                    "Detail":"Imbalance Cost Pass-Through. Quarterly surcharge(+) or rebate(−) per kWh set by Suruhanjaya Tenaga. Domestic (A) is generally exempt."},
+        {"Charge":"KWTBB  (1.6%)",           "Detail":"Kumpulan Wang Tenaga Boleh Baharu. Renewable energy fund levy, charged on non-domestic energy charges."},
+        {"Charge":"Service Tax  (8%)",       "Detail":"Charged on (energy + MD + KWTBB) for Tariff B/C/D/E. Domestic (Tariff A) is fully exempt. Rate raised from 6% to 8% in March 2024."},
+        {"Charge":"Maximum Demand  (MD)",    "Detail":"Highest recorded 30-min average kW in the billing month × RM/kW rate. Applies to Tariff C1, C2, D, E1, E2."},
+        {"Charge":"Peak Hours  (TOU)",       "Detail":"08:00–22:00, Monday–Saturday. All other hours, Sundays & public holidays are Off-Peak."},
+        {"Charge":"Minimum Monthly Charge",  "Detail":"Enforced when the computed bill is below RM 3.00 (A), RM 7.20 (B), or RM 600.00 (C/D/E)."},
+        {"Charge":"Solar NEM Credit",        "Detail":"Net Energy Metering buyback for solar export. Applied AFTER all tariff charges, ICPT, KWTBB, and Service Tax. Default: RM 0.31/kWh (TNB NEM 3.0)."},
+    ]), use_container_width=True, hide_index=True)
 
-            with m3:
-                st.markdown('<div class="metric-label">Live MAE</div>', unsafe_allow_html=True)
-                if acc["overall_mae"] is not None:
-                    st.markdown(f'<div class="big-metric">{acc["overall_mae"]:.0f} kW</div>',
-                        unsafe_allow_html=True)
-                else:
-                    st.markdown('<div class="big-metric">—</div>', unsafe_allow_html=True)
-
-            with m4:
-                st.markdown('<div class="metric-label">In 80% CI</div>', unsafe_allow_html=True)
-                if acc["within_80ci_pct"] is not None:
-                    color = "#00d4aa" if acc["within_80ci_pct"] >= 70 else "#ff9a3c"
-                    st.markdown(f'<div class="big-metric" style="color: {color};">'
-                                f'{acc["within_80ci_pct"]:.0f}%</div>', unsafe_allow_html=True)
-                    st.caption("target: ~80%")
-                else:
-                    st.markdown('<div class="big-metric">—</div>', unsafe_allow_html=True)
-
-            with m5:
-                st.markdown('<div class="metric-label">Bias correction</div>', unsafe_allow_html=True)
-                bias = getattr(sim_state, "current_bias", 0.0)
-                if bias != 0.0:
-                    sign = "+" if bias > 0 else ""
-                    color = "#00d4aa" if abs(bias) < 50 else "#ff9a3c"
-                    st.markdown(f'<div class="big-metric" style="color:{color};">'
-                                f'{sign}{bias:.0f} kW</div>', unsafe_allow_html=True)
-                    st.caption(f"{len(sim_state.retrain_log)} retrains")
-                else:
-                    st.markdown('<div class="big-metric">—</div>', unsafe_allow_html=True)
-                    st.caption(f"{len(sim_state.retrain_log)} retrains")
-
-            # ---------------- MAIN CHART ----------------
-            st.subheader("📈 Forecast vs Actual (live)")
-            revealed = sim_state.revealed_data()
-            cur_fc = sim_state.current_forecast
-
-            # ---- 48-hour paging (96 ticks at 30-min resolution) ----
-            TICKS_PER_WINDOW = 96
-            page = sim_state.tick // TICKS_PER_WINDOW
-            window_start_tick = page * TICKS_PER_WINDOW
-            sim_ts_series = sim_state.future_data["timestamp"]
-            window_start_ts = sim_ts_series.iloc[min(window_start_tick, len(sim_ts_series) - 1)]
-            window_end_ts = window_start_ts + pd.Timedelta(hours=48)
-
-            fig = go.Figure()
-
-            # Training history context — only on page 0 (before simulation data begins)
-            sim_first_ts = sim_state.future_data["timestamp"].iloc[0]
-            if page == 0:
-                train_tail = fc.history[fc.history["timestamp"] < sim_first_ts].tail(96)
-                if len(train_tail) > 0:
-                    fig.add_trace(go.Scatter(
-                        x=train_tail["timestamp"], y=train_tail["kw_import"],
-                        name="Training history",
-                        line=dict(color="#555", width=1.5),
-                    ))
-
-            # Revealed actuals — current window only
-            # Include a 2-hour overlap buffer on non-first pages so the line
-            # doesn't start abruptly at the left edge.
-            buf = pd.Timedelta(hours=2) if page > 0 else pd.Timedelta(0)
-            revealed_window = revealed[revealed["timestamp"] >= (window_start_ts - buf)]
-            if len(revealed_window) > 0:
-                fig.add_trace(go.Scatter(
-                    x=revealed_window["timestamp"], y=revealed_window["kw_import"],
-                    name="Actual (live)",
-                    line=dict(color="#00d4aa", width=3),
-                    mode="lines+markers", marker=dict(size=5),
-                ))
-
-            # Current forecast
-            if cur_fc is not None:
-                fig.add_trace(go.Scatter(
-                    x=list(cur_fc.timestamps) + list(cur_fc.timestamps[::-1]),
-                    y=list(cur_fc.p90) + list(cur_fc.p10[::-1]),
-                    fill="toself", fillcolor="rgba(255,154,60,0.15)",
-                    line=dict(color="rgba(0,0,0,0)"), hoverinfo="skip",
-                    name="80% CI (forecast)",
-                ))
-                fig.add_trace(go.Scatter(
-                    x=cur_fc.timestamps, y=cur_fc.median,
-                    name="Forecast",
-                    line=dict(color="#ff9a3c", width=2.5, dash="dot"),
-                ))
-
-            # Retrain markers — only those within the current window
-            for rt in sim_state.retrain_log:
-                x_val = rt["reveal_ts"]
-                if not (window_start_ts - buf <= x_val <= window_end_ts):
-                    continue
-                fig.add_shape(
-                    type="line", x0=x_val, x1=x_val, y0=0, y1=1,
-                    xref="x", yref="paper",
-                    line=dict(width=1, dash="dot", color="rgba(255,255,255,0.25)"),
-                )
-                fig.add_annotation(
-                    x=x_val, y=1.02, xref="x", yref="paper",
-                    text="🔄", showarrow=False, font=dict(size=11),
-                )
-
-            fig.update_layout(
-                template="plotly_dark", height=480,
-                title=dict(
-                    text=f"Window {page + 1}  ·  "
-                         f"{window_start_ts.strftime('%d %b %H:%M')} → "
-                         f"{window_end_ts.strftime('%d %b %H:%M')}",
-                    font=dict(size=13), x=0,
-                ),
-                xaxis=dict(
-                    title="Time",
-                    range=[window_start_ts, window_end_ts],
-                ),
-                yaxis_title="kW Import",
-                hovermode="x unified",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-            )
-            st.plotly_chart(fig, use_container_width=True, key=f"sim_main_{sim_state.tick}")
-
-            # ---------------- SECONDARY CHARTS ----------------
-            fva = build_forecast_vs_actual_df(sim_state)
-            verified = fva[fva["actual"].notna()]
-
-            if len(verified) > 0:
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.subheader("📊 Forecast vs Actual @ verified timestamps")
-                    fig2 = go.Figure()
-                    fig2.add_trace(go.Scatter(x=verified["target_ts"], y=verified["median"],
-                        name="Forecast", line=dict(color="#ff9a3c", width=2, dash="dot")))
-                    fig2.add_trace(go.Scatter(x=verified["target_ts"], y=verified["actual"],
-                        name="Actual", line=dict(color="#00d4aa", width=2)))
-                    fig2.update_layout(template="plotly_dark", height=320,
-                        xaxis_title="Time", yaxis_title="kW", hovermode="x unified",
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
-                    st.plotly_chart(fig2, use_container_width=True, key=f"sim_vs_{sim_state.tick}")
-
-                with c2:
-                    st.subheader("📉 MAPE improvement (retrain events)")
-                    if len(sim_state.retrain_log) > 0:
-                        log = pd.DataFrame(sim_state.retrain_log)
-                        fig3 = go.Figure()
-                        fig3.add_trace(go.Scatter(
-                            x=log["reveal_ts"], y=log["mean_mape"],
-                            mode="lines+markers+text",
-                            text=[f"{v:.1f}%" for v in log["mean_mape"]],
-                            textposition="top center",
-                            line=dict(color="#00d4aa"), marker=dict(size=10)))
-                        fig3.update_layout(template="plotly_dark", height=320,
-                            xaxis_title="Retrain event", yaxis_title="MAPE (%)",
-                            showlegend=False)
-                        st.plotly_chart(fig3, use_container_width=True,
-                            key=f"sim_mape_{sim_state.tick}")
-                    else:
-                        st.info("Waiting for first retrain event…")
-
-            # ---------------- AUTO-ADVANCE ----------------
-            # Streamlit doesn't have background loops, so we use this pattern:
-            # if playing, sleep for tick_interval, advance once, rerun.
-            # Each rerun re-executes the whole script, landing here and
-            # advancing again.
-            if st.session_state.sim_running and not sim_state.is_finished:
-                now = time.time()
-                elapsed = now - st.session_state.sim_last_advance_time
-                wait = max(0.0, sim_state.tick_interval_s - elapsed)
-                if wait > 0:
-                    time.sleep(wait)
-                advance_one_tick(fc, sim_state)
-                st.session_state.sim_last_advance_time = time.time()
-                st.rerun()
-
-# ======================================================= TAB 4: CV
-with tab4:
-    st.header("Time-Series Cross-Validation")
-    if fc is None or st.session_state.history is None:
-        st.warning("Train a model first.")
-    else:
-        cA, cB, cC = st.columns(3)
-        n_splits = cA.number_input("CV folds", 2, 8, 4)
-        min_train_days = cB.number_input("Min training days", 14, 90, 21)
-        val_block = cC.number_input("Val block (days)", 3, 14, 5)
-
-        if st.button("🧪 Run CV", type="primary"):
-            t0 = time.time()
-            with st.spinner(f"Running {n_splits}-fold CV…"):
-                report = expanding_window_cv(
-                    st.session_state.history,
-                    forecaster_factory=lambda: DirectMultiStepForecaster(
-                        capacity_kwp=fc.capacity_kwp, n_estimators=150),
-                    n_splits=int(n_splits),
-                    min_train_days=int(min_train_days),
-                    val_block_days=int(val_block),
-                    forecast_origins_per_fold=5,
-                )
-                st.session_state.cv_report = report
-            st.success(f"✅ CV done in {time.time()-t0:.1f}s")
-
-        report = st.session_state.cv_report
-        if report:
-            st.subheader("Aggregate")
-            rows = []
-            for h, m in sorted(report["aggregate"].items()):
-                hl = f"+{h*30}min" if h*30 < 60 else f"+{h/2:.1f}h"
-                rows.append({"Horizon": hl, "Mean MAPE": f"{m['mean_mape']:.2f}%",
-                    "± Std": f"{m['std_mape']:.2f}%", "Mean MAE": f"{m['mean_mae']:.1f} kW",
-                    "n folds": m["n_folds"]})
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-            with st.expander("📋 Plain-text report"):
-                st.code(format_cv_report(report))
-
-# ======================================================= TAB 5: DIAGNOSTICS
-with tab5:
-    st.header("Model Diagnostics")
-    if fc is None or metrics is None:
-        st.warning("Train a model first.")
-    else:
-        c1, c2 = st.columns(2)
-        with c1:
-            st.subheader("Per-Horizon Accuracy")
-            ph = metrics.get("per_horizon", {})
-            rows = []
-            for h, m in sorted(ph.items()):
-                hl = f"+{h*30}min" if h*30 < 60 else f"+{h/2:.1f}h"
-                rows.append({"Horizon": hl, "MAE (kW)": f"{m['mae']:.1f}",
-                    "MAPE (%)": f"{m['mape']:.2f}"})
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        with c2:
-            st.subheader("Update History")
-            if st.session_state.update_log:
-                ldf = pd.DataFrame(st.session_state.update_log)
-                ldf["time"] = ldf["time"].dt.strftime("%H:%M:%S")
-                st.dataframe(ldf, use_container_width=True, hide_index=True)
-
-        st.subheader("Save / Load Model")
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("💾 Save"):
-                Path("models").mkdir(exist_ok=True)
-                p = Path("models") / f"{st.session_state.site_name.replace(' ', '_')}.joblib"
-                fc.save(p)
-                st.success(f"Saved to {p}")
-        with c2:
-            saved = list(Path("models").glob("*.joblib")) if Path("models").exists() else []
-            if saved:
-                pick = st.selectbox("Load", [str(p) for p in saved])
-                if st.button("📂 Load"):
-                    st.session_state.forecaster = DirectMultiStepForecaster.load(pick)
-                    st.session_state.forecast_result = st.session_state.forecaster.forecast(48)
-                    st.success(f"Loaded {pick}")
-                    st.rerun()
+    # Auto-detection rules
+    st.subheader("Auto-Detection Rules (Voltage Proxy via Peak Demand)")
+    st.dataframe(pd.DataFrame([
+        {"Peak Demand (kW)": "< 12 kW",        "Inferred Tariff": "A — Domestic",        "Voltage": "Low Voltage",    "Notes": "Residential evening-peak profile."},
+        {"Peak Demand (kW)": "12 – 25 kW",     "Inferred Tariff": "B — LV Commercial",   "Voltage": "Low Voltage",    "Notes": "Daytime-heavy or usage > 2,000 kWh/month."},
+        {"Peak Demand (kW)": "25 – 999 kW",    "Inferred Tariff": "C1 or C2",            "Voltage": "Medium Voltage", "Notes": "C2 suggested if off-peak fraction ≥ 35% or load factor ≥ 70%."},
+        {"Peak Demand (kW)": "1,000 – 4,999 kW","Inferred Tariff": "D — HV General",     "Voltage": "High Voltage",   "Notes": "Large industrial supply."},
+        {"Peak Demand (kW)": "≥ 5,000 kW",     "Inferred Tariff": "E1 / E2",             "Voltage": "High Voltage",   "Notes": "E2 if MD ≥ 1,500 kW and load factor ≥ 60%."},
+    ]), use_container_width=True, hide_index=True)
