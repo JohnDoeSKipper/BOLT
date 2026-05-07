@@ -209,22 +209,27 @@ def advance_one_tick(
             state.last_retrain_tick = state.tick
 
     # --- Step 4: compute rolling bias then regenerate forecast ---
-    # Use the last 8 verified h=1 predictions (covers 4 hours of data).
-    # h=1 is the immediate next-step prediction — any systematic offset
-    # there reveals a level shift the model hasn't yet learned.
-    recent_h1 = [
-        r for r in state.forecast_log
-        if r["actual"] is not None and r["horizon_steps"] == 1
-    ][-8:]
+    # Build a per-horizon bias profile from recent verified errors at
+    # multiple horizons (h=1, h=4, h=8, h=12, h=24), then pass the h=1
+    # bias to the forecaster which applies it with linear decay.
+    # This catches level shifts that persist beyond the immediate next step.
+    verified_all = [r for r in state.forecast_log if r["actual"] is not None]
 
-    if len(recent_h1) >= 3:
-        errors = [r["actual"] - r["median"] for r in recent_h1]
-        raw_bias = float(np.mean(errors))
-        # Cap at ±20 % of recent mean actual so we don't over-correct
-        # during temporary spikes (e.g. a single anomalous reading).
-        mean_actual = float(np.mean([r["actual"] for r in recent_h1]))
+    def _horizon_bias(h_target: int, n: int = 8) -> float | None:
+        rows = [r for r in verified_all if r["horizon_steps"] == h_target][-n:]
+        if len(rows) < 3:
+            return None
+        errors = [r["actual"] - r["median"] for r in rows]
+        mean_actual = float(np.mean([r["actual"] for r in rows]))
         cap = 0.20 * max(mean_actual, 1.0)
-        state.current_bias = float(np.clip(raw_bias, -cap, cap))
+        return float(np.clip(np.mean(errors), -cap, cap))
+
+    # Prefer short-horizon bias (most reliable signal), fall back to longer
+    for check_h in [1, 2, 4]:
+        b = _horizon_bias(check_h)
+        if b is not None:
+            state.current_bias = b
+            break
     else:
         state.current_bias = 0.0
 

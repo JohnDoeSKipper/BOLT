@@ -42,11 +42,29 @@ def add_rolling_features(df: pd.DataFrame, target: str = "kw_import") -> pd.Data
     """Rolling stats give the model a sense of recent trend + volatility."""
     out = df.copy()
     s = out[target].shift(1)
-    out["roll_mean_24"] = s.rolling(24, min_periods=1).mean()
-    out["roll_mean_48"] = s.rolling(48, min_periods=1).mean()
-    out["roll_std_48"]  = s.rolling(48, min_periods=1).std().fillna(0)
-    out["roll_max_48"]  = s.rolling(48, min_periods=1).max()
-    out["roll_min_48"]  = s.rolling(48, min_periods=1).min()
+    out["roll_mean_24"]  = s.rolling(24,  min_periods=1).mean()
+    out["roll_mean_48"]  = s.rolling(48,  min_periods=1).mean()
+    out["roll_std_48"]   = s.rolling(48,  min_periods=1).std().fillna(0)
+    out["roll_max_48"]   = s.rolling(48,  min_periods=1).max()
+    out["roll_min_48"]   = s.rolling(48,  min_periods=1).min()
+    out["roll_mean_336"] = s.rolling(336, min_periods=48).mean()  # 7-day average
+    return out
+
+
+def add_schedule_features(df: pd.DataFrame, target: str = "kw_import") -> pd.DataFrame:
+    """
+    Historical mean and std for each (day-of-week, hour) bucket.
+    Gives the model a strong weekly schedule prior — the single most
+    predictive signal for long-horizon forecasts on commercial sites.
+    """
+    out = df.copy()
+    hour_bin = out["timestamp"].dt.hour
+    dow = out["timestamp"].dt.dayofweek
+    # 168 unique keys (7 days × 24 hours)
+    out["_sched_key"] = dow * 24 + hour_bin
+    out["dow_hour_mean"] = out.groupby("_sched_key")[target].transform("mean")
+    out["dow_hour_std"]  = out.groupby("_sched_key")[target].transform("std").fillna(0)
+    out.drop(columns=["_sched_key"], inplace=True)
     return out
 
 
@@ -108,6 +126,7 @@ def build_feature_matrix(
     out = add_time_features(df)
     out = add_lag_features(out, target=target)
     out = add_rolling_features(out, target=target)
+    out = add_schedule_features(out, target=target)
     out = add_solar_features(out, capacity_kwp=capacity_kwp)
     out = add_temperature_features(out)
 
@@ -116,6 +135,8 @@ def build_feature_matrix(
         "hour_sin", "hour_cos", "dow_sin", "dow_cos",
         *[f"lag_{L}" for L in DEFAULT_LAGS],
         "roll_mean_24", "roll_mean_48", "roll_std_48", "roll_max_48", "roll_min_48",
+        "roll_mean_336",
+        "dow_hour_mean", "dow_hour_std",
         "solar_capacity_kwp", "est_solar_gen_kw", "has_solar",
         "est_temp_c", "is_hot_period",
     ]

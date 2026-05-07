@@ -5,11 +5,14 @@ v3 adds: Live Simulation tab with auto-replay of future data, live
 forecast-vs-actual tracking, running accuracy metrics, and periodic
 warm-start retrains.
 """
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from pathlib import Path
 import time
 
 from src.data_loader import auto_load, load_csv, summarize
@@ -309,33 +312,41 @@ with tab3:
         # ---------------- CONFIGURATION PANEL ----------------
         if sim_state is None:
             st.subheader("Configure Simulation")
+
+            # Always show the uploader so the user can supply their own data
+            # at any time, regardless of whether data was reserved at training.
+            sim_upload = st.file_uploader(
+                "Upload simulation data (optional — overrides reserved split)",
+                type=["xlsx", "xls", "csv"], key="sim_upload",
+            )
+
             future_df = st.session_state.sim_future_data
 
-            if future_df is not None:
-                st.success(f"✅ Using {len(future_df):,} rows reserved during training.")
+            if sim_upload is not None:
+                tmp = Path("data") / f"_sim_{sim_upload.name}"
+                tmp.parent.mkdir(exist_ok=True)
+                tmp.write_bytes(sim_upload.getvalue())
+                try:
+                    fd = load_csv(tmp) if tmp.suffix.lower() == ".csv" else auto_load(tmp)
+                    cutoff = fc.history["timestamp"].max()
+                    fd_new = fd[fd["timestamp"] > cutoff].reset_index(drop=True)
+                    if len(fd_new) == 0:
+                        st.error(f"No rows after training cutoff ({cutoff}). "
+                                 "Upload data that continues from where training ended.")
+                    else:
+                        future_df = fd_new
+                        st.success(f"✅ Loaded **{len(future_df):,}** simulation rows from upload "
+                                   f"({future_df['timestamp'].min().date()} → "
+                                   f"{future_df['timestamp'].max().date()}).")
+                except Exception as e:
+                    st.error(f"Could not parse uploaded file: {e}")
+            elif future_df is not None:
+                st.success(f"✅ Using **{len(future_df):,}** rows reserved during training.")
                 st.caption(f"Simulation period: "
-                    f"{future_df['timestamp'].min()} → {future_df['timestamp'].max()}")
+                           f"{future_df['timestamp'].min()} → {future_df['timestamp'].max()}")
             else:
-                st.info("No data reserved. Upload a future CSV, or go back to Setup and tick "
+                st.info("Upload a file above, or go back to Setup and tick "
                         "'Split this dataset' when training.")
-                sim_upload = st.file_uploader("Upload simulation data",
-                    type=["xlsx", "xls", "csv"], key="sim_upload")
-                if sim_upload is not None:
-                    tmp = Path("data") / f"_sim_{sim_upload.name}"
-                    tmp.parent.mkdir(exist_ok=True)
-                    tmp.write_bytes(sim_upload.getvalue())
-                    try:
-                        fd = load_csv(tmp) if tmp.suffix.lower() == ".csv" else auto_load(tmp)
-                        cutoff = fc.history["timestamp"].max()
-                        fd = fd[fd["timestamp"] > cutoff].reset_index(drop=True)
-                        if len(fd) == 0:
-                            st.error(f"No rows after training cutoff ({cutoff}).")
-                            future_df = None
-                        else:
-                            future_df = fd
-                            st.success(f"✅ Loaded {len(future_df):,} simulation rows.")
-                    except Exception as e:
-                        st.error(f"Could not parse: {e}")
 
             if future_df is not None and len(future_df) > 0:
                 c1, c2, c3 = st.columns(3)
@@ -462,13 +473,35 @@ with tab3:
             # ---------------- MAIN CHART ----------------
             st.subheader("📈 Forecast vs Actual (live)")
             revealed = sim_state.revealed_data()
-            cur_fc = sim_state.current_forecast
+            cur_fc   = sim_state.current_forecast
+
+            # 24-hour sliding window: last 48 revealed readings + 48-step forecast
+            window_actual = revealed.tail(48)  # last 24 h of actuals
+
+            # x-axis bounds: 24 h back from now, 24 h forward
+            if len(window_actual) > 0:
+                x_now   = window_actual["timestamp"].iloc[-1]
+                x_start = x_now - pd.Timedelta(hours=24)
+                x_end   = x_now + pd.Timedelta(hours=24)
+            elif cur_fc is not None:
+                x_now   = cur_fc.timestamps[0]
+                x_start = x_now - pd.Timedelta(hours=24)
+                x_end   = x_now + pd.Timedelta(hours=24)
+            else:
+                x_start = x_end = None
 
             fig = go.Figure()
 
-            # Training history context (last 48 ticks = 24h)
+            # A few hours of training context before the simulation window
             sim_first_ts = sim_state.future_data["timestamp"].iloc[0]
-            train_tail = fc.history[fc.history["timestamp"] < sim_first_ts].tail(96)
+            if x_start is not None:
+                train_tail = fc.history[
+                    (fc.history["timestamp"] >= x_start) &
+                    (fc.history["timestamp"] < sim_first_ts)
+                ]
+            else:
+                train_tail = fc.history[fc.history["timestamp"] < sim_first_ts].tail(48)
+
             if len(train_tail) > 0:
                 fig.add_trace(go.Scatter(
                     x=train_tail["timestamp"], y=train_tail["kw_import"],
@@ -476,16 +509,16 @@ with tab3:
                     line=dict(color="#555", width=1.5),
                 ))
 
-            # Revealed actuals
-            if len(revealed) > 0:
+            # Revealed actuals (24-h window)
+            if len(window_actual) > 0:
                 fig.add_trace(go.Scatter(
-                    x=revealed["timestamp"], y=revealed["kw_import"],
+                    x=window_actual["timestamp"], y=window_actual["kw_import"],
                     name="Actual (live)",
                     line=dict(color="#00d4aa", width=3),
                     mode="lines+markers", marker=dict(size=5),
                 ))
 
-            # Current forecast
+            # Current 24-h forecast
             if cur_fc is not None:
                 fig.add_trace(go.Scatter(
                     x=list(cur_fc.timestamps) + list(cur_fc.timestamps[::-1]),
@@ -496,25 +529,42 @@ with tab3:
                 ))
                 fig.add_trace(go.Scatter(
                     x=cur_fc.timestamps, y=cur_fc.median,
-                    name="Forecast",
+                    name="Forecast (median)",
                     line=dict(color="#ff9a3c", width=2.5, dash="dot"),
                 ))
 
-            # Retrain markers
-            # Note: convert pandas Timestamp -> python datetime to avoid a
-            # plotly bug where add_vline with annotation_text internally calls
-            # sum([timestamp]) which fails on pandas>=2.0.
+            # Retrain markers — add_vline with annotation_text is broken in
+            # newer plotly (its internal _mean calls sum([x]) on non-numeric x).
+            # Use add_shape + add_annotation separately to bypass that code path.
+            shapes      = []
+            annotations = []
             for rt in sim_state.retrain_log:
-                vline_x = pd.Timestamp(rt["reveal_ts"]).to_pydatetime()
-                fig.add_vline(x=vline_x, line_width=1, line_dash="dot",
-                    line_color="rgba(255,255,255,0.25)",
-                    annotation_text="🔄",
-                    annotation_position="top", annotation_font_size=11)
+                rt_ts = pd.Timestamp(rt["reveal_ts"])
+                # Only draw markers within the visible window
+                if x_start is not None and not (x_start <= rt_ts <= x_end):
+                    continue
+                rt_str = rt_ts.isoformat()
+                shapes.append(dict(
+                    type="line",
+                    x0=rt_str, x1=rt_str, y0=0, y1=1,
+                    xref="x", yref="paper",
+                    line=dict(color="rgba(255,255,255,0.25)", width=1, dash="dot"),
+                ))
+                annotations.append(dict(
+                    x=rt_str, y=1, xref="x", yref="paper",
+                    text="🔄", showarrow=False,
+                    font=dict(size=11), yanchor="bottom",
+                ))
 
-            fig.update_layout(template="plotly_dark", height=480,
+            fig.update_layout(
+                template="plotly_dark", height=480,
                 xaxis_title="Time", yaxis_title="kW Import",
                 hovermode="x unified",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+                xaxis=dict(range=[x_start, x_end] if x_start else None),
+                shapes=shapes,
+                annotations=annotations,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+            )
             st.plotly_chart(fig, use_container_width=True, key=f"sim_main_{sim_state.tick}")
 
             # ---------------- SECONDARY CHARTS ----------------
