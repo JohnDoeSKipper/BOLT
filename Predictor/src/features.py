@@ -68,6 +68,29 @@ def add_schedule_features(df: pd.DataFrame, target: str = "kw_import") -> pd.Dat
     return out
 
 
+def add_regime_features(df: pd.DataFrame, target: str = "kw_import") -> pd.DataFrame:
+    """
+    Regime-shift signals: tell the trees how today compares to history.
+
+    Without these, on bimodal sites (some days busy, some quiet), the model's
+    median prediction collapses to the historical mean of the dow_hour bucket,
+    which is between the two regimes — so it over-predicts on quiet days and
+    under-predicts on busy ones. The deltas + recent-vs-schedule give a
+    splittable feature that says "we are in a quiet/loud regime right now",
+    which the trees can use to pick the appropriate leaf.
+    """
+    out = df.copy()
+    s = out[target]
+    out["delta_vs_24h"] = s.shift(1) - s.shift(48)
+    out["delta_vs_7d"]  = s.shift(1) - s.shift(336)
+    # Recent rolling mean vs the long-run dow_hour baseline.
+    # Both inputs are already shifted-1 (rolling) and historical (groupby
+    # transform), so no current-row leakage.
+    if "roll_mean_24" in out.columns and "dow_hour_mean" in out.columns:
+        out["recent_vs_schedule"] = out["roll_mean_24"] - out["dow_hour_mean"]
+    return out
+
+
 # ---- Tropical temperature model (Malaysia) ----------------------------------
 # Half-hourly temperature (°C) for a typical Malaysian day.
 # Sinusoidal: mean 29 °C, amplitude 4 °C, trough ~06:00 (hh=12), peak ~14:00 (hh=28).
@@ -127,6 +150,9 @@ def build_feature_matrix(
     out = add_lag_features(out, target=target)
     out = add_rolling_features(out, target=target)
     out = add_schedule_features(out, target=target)
+    # add_regime_features depends on roll_mean_24 + dow_hour_mean already
+    # being present, so it must run after those two.
+    out = add_regime_features(out, target=target)
     out = add_solar_features(out, capacity_kwp=capacity_kwp)
     out = add_temperature_features(out)
 
@@ -137,6 +163,7 @@ def build_feature_matrix(
         "roll_mean_24", "roll_mean_48", "roll_std_48", "roll_max_48", "roll_min_48",
         "roll_mean_336",
         "dow_hour_mean", "dow_hour_std",
+        "delta_vs_24h", "delta_vs_7d", "recent_vs_schedule",
         "solar_capacity_kwp", "est_solar_gen_kw", "has_solar",
         "est_temp_c", "is_hot_period",
     ]

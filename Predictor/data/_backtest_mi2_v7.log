@@ -1,0 +1,22 @@
+[load] /Users/jaredang/Downloads/BOLT-master/Predictor/data/mi2_historical.csv
+  rows=2049  range=2025-11-01 00:30:00 → 2025-12-13 16:30:00
+  has_solar=True (Non-zero kW Export detected (power flowing back to grid).)  capacity_kwp=780.0
+[split] train=1434  future=615
+[fit] training forecaster from scratch
+  done in 35.2s   mean_mape=13.39%
+[sim] initializing  retrain_every_n=12  rounds=50
+[run] advancing 100 ticks
+  tick   12/100: retrain  samples_added=12  mean_mape=13.74%
+  tick   24/100: retrain  samples_added=12  mean_mape=13.81%
+  tick   36/100: retrain  samples_added=12  mean_mape=14.68%
+  tick   48/100: retrain  samples_added=12  mean_mape=14.98%
+  tick   50/100  rate=0.8 ticks/s  eta=65s
+  tick   60/100: retrain  samples_added=12  mean_mape=14.72%
+  tick   72/100: retrain  samples_added=12  mean_mape=14.54%
+  tick   84/100: retrain  samples_added=12  mean_mape=14.87%
+  tick   96/100: retrain  samples_added=12  mean_mape=14.55%
+  tick  100/100  rate=0.7 ticks/s  eta=0s
+[done] sim finished in 135.2s
+[save] writing forecast log
+  → /Users/jaredang/Downloads/BOLT-master/Predictor/data/_backtest_mi2_v7.csv  (4848 rows)
+  → /Users/jaredang/Downloads/BOLT-master/Predictor/data/_backtest_mi2_v7.meta.json

@@ -67,9 +67,22 @@ class SimulationState:
     # Latest full forecast (for chart display)
     current_forecast: Optional["MultiStepForecastResult"] = None
 
-    # Current rolling bias correction (kW). Positive = model was under-predicting.
-    # Recomputed each tick from recent h=1 verified errors.
+    # Per-horizon bias correction (kW), one entry per output step. Positive
+    # entry = model was under-predicting at that horizon. The forecaster
+    # applies the array as-is; on regime-shifting sites the gap is roughly
+    # constant across horizons so per-horizon correction beats scalar +
+    # linear decay (which would zero out the correction at long horizons,
+    # exactly where it's needed for next-day noon predictions).
+    current_bias_profile: Optional[np.ndarray] = None
+
+    # Backwards-compat: scalar h=1 bias correction. Set to bias_profile[0]
+    # so the existing UI metric panel keeps working without changes.
     current_bias: float = 0.0
+
+    # Per-horizon conformal half-width (kW): empirical |residual| quantile
+    # used to widen the prediction band. Trained quantile bands cover only
+    # ~43% of actuals vs the 80% target — this calibration restores it.
+    current_conformal_hw: Optional[np.ndarray] = None
 
     # =================================================================
     #                         LIFECYCLE
@@ -152,6 +165,96 @@ def _fill_actuals(state: SimulationState, actual_ts: pd.Timestamp, actual_kw: fl
             row["actual"] = float(actual_kw)
 
 
+def _compute_calibration(
+    state: SimulationState,
+    output_steps: int,
+    bias_window: int = 6,
+    conformal_window: int = 96,
+    conformal_alpha: float = 0.8,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Build (bias_profile, conformal_half_width), each length output_steps.
+
+    bias_profile[i]: mean signed error (actual - median) at horizon i+1 over
+        the last `bias_window` verified rows for that horizon. Why
+        per-horizon and not a scalar with linear decay: on stable commercial
+        sites a scalar h=1 bias works, but on regime-shifting sites the gap
+        between forecast and actual is roughly *constant* across horizons
+        (e.g. 'we're in a quiet week, all 48 horizons over-predict by ~30
+        kW'). Linear decay then fades the correction to zero exactly where
+        it's most needed — long-horizon noon predictions. A per-horizon
+        profile catches each horizon's own gap. Falls back to neighbouring
+        horizons when a horizon hasn't accumulated enough samples yet.
+
+    conformal_half_width[i]: empirical `conformal_alpha`-quantile of
+        |residual| at horizon i+1, computed over the last `conformal_window`
+        verified rows. Widens the band post-hoc to hit the 80% coverage
+        target (raw LightGBM quantile bands cover only ~43%).
+    """
+    verified = [r for r in state.forecast_log if r["actual"] is not None]
+    bias_profile = np.zeros(output_steps)
+    hw = np.zeros(output_steps)
+    if not verified:
+        return bias_profile, hw
+
+    by_h: dict[int, list[dict]] = {}
+    for r in verified:
+        by_h.setdefault(int(r["horizon_steps"]), []).append(r)
+
+    all_residuals = [abs(r["actual"] - r["median"]) for r in verified[-conformal_window:]]
+    global_hw = float(np.quantile(all_residuals, conformal_alpha)) if all_residuals else 0.0
+
+    # Cap scaling: use whichever of recent actual / recent median is larger,
+    # so on a regime shift the cap follows the gap (smaller actual, larger
+    # forecast → cap should still be big enough to close the gap).
+    recent = verified[-conformal_window:]
+    recent_actual_mean = float(np.mean([r["actual"] for r in recent]))
+    recent_median_mean = float(np.mean([r["median"] for r in recent]))
+    cap = 0.80 * max(recent_actual_mean, recent_median_mean, 1.0)
+
+    # Compute per-horizon bias from this horizon's own recent verified rows.
+    # Use exponential weighting (most recent count ~2x as much as oldest in
+    # the window) so the bias tracks the current model's residual rather
+    # than averaging with stale forecasts the model has since corrected.
+    # Skip horizons with < 3 samples and fill those in via interpolation
+    # against the populated horizons.
+    raw_bias = np.full(output_steps, np.nan)
+    for h in range(1, output_steps + 1):
+        rows = by_h.get(h, [])[-bias_window:]
+        if len(rows) >= 3:
+            errs = np.array([r["actual"] - r["median"] for r in rows], dtype=float)
+            n = len(errs)
+            # Half-life of n/2 samples → newest sample weighted ~2x oldest.
+            ages = np.arange(n - 1, -1, -1)
+            w = 0.5 ** (ages / max(1.0, n / 2))
+            est = float(np.sum(w * errs) / np.sum(w))
+            raw_bias[h - 1] = float(np.clip(est, -cap, cap))
+    if np.isfinite(raw_bias).any():
+        x = np.arange(output_steps)
+        valid = np.isfinite(raw_bias)
+        bias_profile = np.interp(x, x[valid], raw_bias[valid])
+    # Light smoothing so the per-horizon profile is monotone enough not to
+    # introduce its own kinks; v3 backtest showed unsmoothed profiles caused
+    # mid-horizon variance regressions on stable sites.
+    if output_steps >= 3:
+        kernel = np.array([0.25, 0.5, 0.25])
+        bias_profile = np.convolve(bias_profile, kernel, mode="same")
+
+    for h in range(1, output_steps + 1):
+        rows = by_h.get(h, [])[-conformal_window:]
+        if len(rows) >= 8:
+            resid = [abs(r["actual"] - r["median"]) for r in rows]
+            hw[h - 1] = float(np.quantile(resid, conformal_alpha))
+        else:
+            hw[h - 1] = global_hw
+
+    if output_steps >= 3:
+        kernel = np.array([0.25, 0.5, 0.25])
+        hw = np.convolve(hw, kernel, mode="same")
+
+    return bias_profile, hw
+
+
 def advance_one_tick(
     forecaster: "DirectMultiStepForecaster",
     state: SimulationState,
@@ -208,33 +311,17 @@ def advance_one_tick(
             state.retrain_log.append(retrain_info)
             state.last_retrain_tick = state.tick
 
-    # --- Step 4: compute rolling bias then regenerate forecast ---
-    # Build a per-horizon bias profile from recent verified errors at
-    # multiple horizons (h=1, h=4, h=8, h=12, h=24), then pass the h=1
-    # bias to the forecaster which applies it with linear decay.
-    # This catches level shifts that persist beyond the immediate next step.
-    verified_all = [r for r in state.forecast_log if r["actual"] is not None]
-
-    def _horizon_bias(h_target: int, n: int = 8) -> float | None:
-        rows = [r for r in verified_all if r["horizon_steps"] == h_target][-n:]
-        if len(rows) < 3:
-            return None
-        errors = [r["actual"] - r["median"] for r in rows]
-        mean_actual = float(np.mean([r["actual"] for r in rows]))
-        cap = 0.20 * max(mean_actual, 1.0)
-        return float(np.clip(np.mean(errors), -cap, cap))
-
-    # Prefer short-horizon bias (most reliable signal), fall back to longer
-    for check_h in [1, 2, 4]:
-        b = _horizon_bias(check_h)
-        if b is not None:
-            state.current_bias = b
-            break
-    else:
-        state.current_bias = 0.0
+    # --- Step 4: per-horizon bias + conformal half-width, then forecast ---
+    bias_profile, conformal_hw = _compute_calibration(state, output_steps=48)
+    state.current_bias_profile = bias_profile
+    # Backwards-compat scalar (the UI displays this); use the h=1 entry.
+    state.current_bias = float(bias_profile[0]) if len(bias_profile) else 0.0
+    state.current_conformal_hw = conformal_hw
 
     state.current_forecast = forecaster.forecast(
-        output_steps=48, bias_correction=state.current_bias
+        output_steps=48,
+        bias_correction=bias_profile,
+        conformal_half_width=conformal_hw,
     )
     _log_forecast(state, reveal_ts, state.current_forecast)
 

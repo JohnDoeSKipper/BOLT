@@ -1,0 +1,43 @@
+[load] /Users/jaredang/Downloads/BOLT-master/Predictor/data/mi2_historical.csv
+  rows=2049  range=2025-11-01 00:30:00 → 2025-12-13 16:30:00
+  has_solar=True (Non-zero kW Export detected (power flowing back to grid).)  capacity_kwp=780.0
+[split] train=1434  future=615
+[fit] training forecaster from scratch
+  done in 21.3s   mean_mape=13.61%
+[sim] initializing  retrain_every_n=12  rounds=50
+[run] advancing 300 ticks
+  tick   12/300: retrain  samples_added=12  mean_mape=14.12%
+  tick   24/300: retrain  samples_added=12  mean_mape=14.24%
+  tick   36/300: retrain  samples_added=12  mean_mape=15.15%
+  tick   48/300: retrain  samples_added=12  mean_mape=15.45%
+  tick   50/300  rate=1.4 ticks/s  eta=173s
+  tick   60/300: retrain  samples_added=12  mean_mape=15.18%
+  tick   72/300: retrain  samples_added=12  mean_mape=15.04%
+  tick   84/300: retrain  samples_added=12  mean_mape=15.31%
+  tick   96/300: retrain  samples_added=12  mean_mape=14.92%
+  tick  100/300  rate=1.4 ticks/s  eta=146s
+  tick  108/300: retrain  samples_added=12  mean_mape=14.71%
+  tick  120/300: retrain  samples_added=12  mean_mape=14.73%
+  tick  132/300: retrain  samples_added=12  mean_mape=14.94%
+  tick  144/300: retrain  samples_added=12  mean_mape=14.59%
+  tick  150/300  rate=1.3 ticks/s  eta=116s
+  tick  156/300: retrain  samples_added=12  mean_mape=14.43%
+  tick  168/300: retrain  samples_added=12  mean_mape=14.30%
+  tick  180/300: retrain  samples_added=12  mean_mape=14.60%
+  tick  192/300: retrain  samples_added=12  mean_mape=13.78%
+  tick  200/300  rate=1.2 ticks/s  eta=81s
+  tick  204/300: retrain  samples_added=12  mean_mape=12.20%
+  tick  216/300: retrain  samples_added=12  mean_mape=11.81%
+  tick  228/300: retrain  samples_added=12  mean_mape=12.06%
+  tick  240/300: retrain  samples_added=12  mean_mape=11.67%
+  tick  250/300  rate=1.2 ticks/s  eta=43s
+  tick  252/300: retrain  samples_added=12  mean_mape=10.40%
+  tick  264/300: retrain  samples_added=12  mean_mape=9.39%
+  tick  276/300: retrain  samples_added=12  mean_mape=9.36%
+  tick  288/300: retrain  samples_added=12  mean_mape=9.56%
+  tick  300/300: retrain  samples_added=12  mean_mape=9.45%
+  tick  300/300  rate=1.1 ticks/s  eta=0s
+[done] sim finished in 282.4s
+[save] writing forecast log
+  → /Users/jaredang/Downloads/BOLT-master/Predictor/data/_backtest_mi2.csv  (14448 rows)
+  → /Users/jaredang/Downloads/BOLT-master/Predictor/data/_backtest_mi2.meta.json

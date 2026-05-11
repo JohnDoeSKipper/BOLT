@@ -27,9 +27,14 @@ from typing import Optional
 from src.features import build_feature_matrix
 
 
-# Denser horizons: every step to h=6, every 2 steps to h=24, every 4 steps beyond.
-# Reduces linearly-interpolated steps from 34 → 22 compared to the old sparse list.
-DEFAULT_HORIZONS = [1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 40, 44, 48]
+# Every step to h=12 (full 6h forecast is exact), every 2 steps to h=24 (12h),
+# every 4 steps to h=48. Fixes the sawtooth where odd horizons (h=7, 9, 11, 13)
+# inherit linear-interpolation error from sparse training points.
+DEFAULT_HORIZONS = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    14, 16, 18, 20, 22, 24,
+    28, 32, 36, 40, 44, 48,
+]
 DEFAULT_QUANTILES = (0.1, 0.5, 0.9)
 
 
@@ -92,13 +97,19 @@ class DirectMultiStepForecaster:
         # Long-horizon models need more leaves to capture complex weekly patterns.
         # Short-horizon (h≈1) is dominated by lag autocorrelation — simpler is fine.
         num_leaves = min(127, 31 + h * 2)
+        # Tail quantiles need looser leaves so peaks aren't compressed.
+        # Backtest showed 97% of top-5% peaks landed above the p90 envelope.
+        if q <= 0.15 or q >= 0.85:
+            min_child = 8
+        else:
+            min_child = 15
         return {
             "objective": "quantile",
             "alpha": q,
             "metric": "quantile",
             "learning_rate": self.learning_rate,
             "num_leaves": num_leaves,
-            "min_child_samples": 20,
+            "min_child_samples": min_child,
             "feature_fraction": 0.8,
             "bagging_fraction": 0.8,
             "bagging_freq": 5,
@@ -294,16 +305,26 @@ class DirectMultiStepForecaster:
     def forecast(
         self,
         output_steps: int = 48,
-        bias_correction: float = 0.0,
+        bias_correction: float | np.ndarray = 0.0,
+        conformal_half_width: np.ndarray | None = None,
     ) -> MultiStepForecastResult:
         """
         Predict at all trained horizons in one shot, then linearly interpolate
         between them to produce a smooth `output_steps`-point series.
 
-        bias_correction: additive offset (kW) derived from recent prediction
-        errors. Positive = model has been under-predicting; negative = over.
-        Applied to all quantiles with a decay so it fades over the horizon
-        (correction is strongest at h=1, zero by h=48).
+        bias_correction:
+          - scalar: additive offset (kW) applied to h=1 with linear decay to
+            zero at the longest horizon (legacy behaviour).
+          - 1-D array of length output_steps: per-horizon bias offset, applied
+            as-is. Use this when you have a per-horizon error profile from
+            recent verified predictions — backtest showed bias swings from
+            +18 kW at h=20 to −16 kW at h=36, so a single h=1 value with
+            linear decay was leaving error on the table.
+
+        conformal_half_width: optional 1-D array of length output_steps,
+        widening (p10, p90) to (median ± half_width) per horizon. Set this
+        from empirical |residual| quantiles when the LightGBM quantile bands
+        are systematically too narrow (43% coverage observed vs 80% target).
         """
         if not self.boosters or self.history is None:
             raise RuntimeError("Call fit() before forecast().")
@@ -329,15 +350,32 @@ class DirectMultiStepForecaster:
         p10 = np.interp(dense_steps, self.horizons, [raw[h][0.1] for h in self.horizons])
         p90 = np.interp(dense_steps, self.horizons, [raw[h][0.9] for h in self.horizons])
 
-        # Apply bias correction with linear decay over the forecast horizon.
-        # Full correction at h=1, zero correction by h=48. This avoids
-        # over-correcting long-range forecasts where the bias may not persist.
-        if bias_correction != 0.0:
+        # Bias correction: scalar (legacy) or per-horizon array
+        if isinstance(bias_correction, np.ndarray):
+            correction = bias_correction[:output_steps]
+            if len(correction) < output_steps:
+                correction = np.pad(correction, (0, output_steps - len(correction)),
+                                    constant_values=correction[-1] if len(correction) else 0.0)
+        elif bias_correction != 0.0:
             decay = np.linspace(1.0, 0.0, output_steps)
-            correction = bias_correction * decay
-            median = np.clip(median + correction, 0.0, None)
-            p10 = np.clip(p10 + correction, 0.0, None)
-            p90 = np.clip(p90 + correction, 0.0, None)
+            correction = float(bias_correction) * decay
+        else:
+            correction = np.zeros(output_steps)
+        median = np.clip(median + correction, 0.0, None)
+        p10 = np.clip(p10 + correction, 0.0, None)
+        p90 = np.clip(p90 + correction, 0.0, None)
+
+        # Conformal calibration: widen the band from empirical residuals.
+        # Replaces (not adds to) the LightGBM band whenever it would be
+        # narrower than the empirical one — quantile crossings get fixed below.
+        if conformal_half_width is not None:
+            hw = np.asarray(conformal_half_width, dtype=float)[:output_steps]
+            if len(hw) < output_steps:
+                hw = np.pad(hw, (0, output_steps - len(hw)),
+                            constant_values=hw[-1] if len(hw) else 0.0)
+            p10 = np.minimum(p10, median - hw)
+            p90 = np.maximum(p90, median + hw)
+            p10 = np.clip(p10, 0.0, None)
 
         # Enforce p10 ≤ median ≤ p90 (quantile crossings can occur)
         p10 = np.minimum(p10, median)
