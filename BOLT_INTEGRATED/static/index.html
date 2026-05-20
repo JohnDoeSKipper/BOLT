@@ -1,0 +1,2000 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BOLT Integrated — AI Energy Management Platform</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+/* ═══════════════════════════════════════════════════════════════════════════
+   BOLT INTEGRATED — Design System
+   Base: Manager/index.html (authentic HTML frontend from GitHub master)
+   Extended: Predictor · SAM Calculator · PowerRECO
+   ═══════════════════════════════════════════════════════════════════════════ */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0b0f1c;--s1:#111827;--s2:#182035;--border:#1f2f4a;
+  --accent:#00d4ff;--accent2:#7c3aed;--green:#22c55e;--amber:#f59e0b;
+  --red:#ef4444;--chg:#22c55e;--dis:#f97316;--text:#dde4f0;--muted:#6b7a9a;
+  --md:#ef4444;--TNR:'Times New Roman',Times,serif;
+}
+body{background:var(--bg);color:var(--text);font-family:var(--TNR);min-height:100vh;overflow-x:hidden}
+body::before{content:'';position:fixed;inset:0;
+  background-image:linear-gradient(rgba(0,212,255,.025) 1px,transparent 1px),
+  linear-gradient(90deg,rgba(0,212,255,.025) 1px,transparent 1px);
+  background-size:44px 44px;pointer-events:none;z-index:0}
+
+/* ── Header ──────────────────────────────────────────────────────────────── */
+header{position:sticky;top:0;z-index:20;padding:14px 32px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;justify-content:space-between;
+  background:rgba(11,15,28,.97);backdrop-filter:blur(10px)}
+.logo-icon{width:36px;height:36px;border:2px solid var(--accent);border-radius:8px;
+  display:flex;align-items:center;justify-content:center;font-size:18px;
+  box-shadow:0 0 16px rgba(0,212,255,.35)}
+.logo-wrap{display:flex;align-items:center;gap:11px}
+.logo-title{font-size:19px;font-weight:700;letter-spacing:-.3px}
+.logo-title span{color:var(--accent)}
+.logo-sub{font-size:11px;color:var(--muted);margin-top:2px;font-style:italic}
+.hdr-right{display:flex;align-items:center;gap:14px}
+.hdr-badge{font-size:11px;padding:4px 14px;border:1px solid var(--accent2);border-radius:20px;
+  color:var(--accent2);background:rgba(124,58,237,.12);font-style:italic}
+.server-dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+.server-dot.on{background:var(--green);box-shadow:0 0 6px var(--green);animation:blink 2s infinite}
+
+/* ── Layout ──────────────────────────────────────────────────────────────── */
+.layout{display:grid;grid-template-columns:340px 1fr;min-height:calc(100vh - 57px);position:relative;z-index:1}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   SIDEBAR  (Manager's exact sidebar CSS — preserved verbatim)
+   ══════════════════════════════════════════════════════════════════════════ */
+.sidebar{border-right:1px solid var(--border);padding:18px 16px;
+  background:rgba(17,24,39,.65);overflow-y:auto;display:flex;flex-direction:column;gap:18px;
+  position:sticky;top:57px;height:calc(100vh - 57px)}
+.sec-label{font-size:10px;letter-spacing:2.5px;text-transform:uppercase;color:var(--accent);
+  margin-bottom:8px;display:flex;align-items:center;gap:8px;font-style:italic}
+.sec-label::after{content:'';flex:1;height:1px;background:var(--border)}
+.upload-zone{border:2px dashed var(--border);border-radius:10px;padding:22px 14px;
+  text-align:center;cursor:pointer;transition:all .3s;background:rgba(0,212,255,.02)}
+.upload-zone:hover,.upload-zone.drag{border-color:var(--accent);background:rgba(0,212,255,.05)}
+.upload-zone input{display:none}
+.upload-icon{font-size:26px;margin-bottom:5px}
+.upload-zone strong{font-size:13px;display:block;margin-bottom:3px}
+.upload-zone p{font-size:11px;color:var(--muted);line-height:1.5}
+.file-tag{font-size:11px;color:var(--accent);margin-top:7px;word-break:break-all;font-style:italic}
+select{width:100%;background:var(--s2);border:1px solid var(--border);border-radius:8px;
+  color:var(--text);padding:8px 11px;font-family:var(--TNR);font-size:13px;
+  appearance:none;cursor:pointer;outline:none}
+select:focus{border-color:var(--accent)}
+.load-card{background:var(--s2);border:1px solid var(--border);border-radius:9px;
+  padding:9px 11px;margin-bottom:7px;position:relative}
+.load-card-top{display:flex;align-items:center;gap:7px;margin-bottom:7px}
+.load-color-dot{width:12px;height:12px;border-radius:50%;flex-shrink:0;cursor:pointer;
+  border:2px solid rgba(255,255,255,.2);transition:transform .2s}
+.load-color-dot:hover{transform:scale(1.3)}
+.load-name-input{flex:1;background:transparent;border:none;border-bottom:1px solid var(--border);
+  color:var(--text);font-family:var(--TNR);font-size:13px;font-weight:700;padding:2px 4px;outline:none}
+.load-name-input:focus{border-bottom-color:var(--accent)}
+.load-remove-btn{background:none;border:none;color:var(--muted);cursor:pointer;
+  font-size:16px;line-height:1;padding:2px 4px;border-radius:4px;transition:color .2s}
+.load-remove-btn:hover{color:var(--red)}
+.load-card-row{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+.load-field{text-align:center}
+.load-field-label{font-size:10px;color:var(--muted);margin-bottom:4px;font-style:italic}
+.load-number{width:100%;background:var(--s1);border:1px solid var(--border);border-radius:6px;
+  color:var(--text);font-family:var(--TNR);font-size:13px;padding:5px;text-align:center;outline:none}
+.load-number:focus{border-color:var(--accent)}
+.load-unit{font-size:10px;color:var(--muted);margin-top:2px}
+input[type=range]{-webkit-appearance:none;width:100%;height:3px;border-radius:2px;
+  background:var(--border);outline:none;cursor:pointer;margin-top:5px}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;
+  border-radius:50%;background:var(--accent);box-shadow:0 0 6px var(--accent)}
+.prop-total{font-size:11px;text-align:right;margin-top:2px;font-style:italic}
+.prop-total.ok{color:var(--green)}.prop-total.warn{color:var(--red)}
+.add-load-btn{width:100%;padding:7px;background:transparent;border:1px dashed var(--border);
+  border-radius:8px;color:var(--muted);font-family:var(--TNR);font-size:12px;
+  cursor:pointer;transition:all .2s;font-style:italic}
+.add-load-btn:hover{border-color:var(--accent);color:var(--accent);background:rgba(0,212,255,.04)}
+.priority-list{display:flex;flex-direction:column;gap:5px}
+.priority-item{display:flex;align-items:center;gap:6px;background:var(--s2);
+  border:1px solid var(--border);border-radius:8px;padding:7px 10px;cursor:grab;
+  transition:all .2s;user-select:none}
+.priority-item:hover{border-color:var(--accent)}
+.priority-item.dragging{opacity:.45}
+.p-rank{font-size:10px;color:var(--muted);width:14px;font-style:italic}
+.p-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.p-name{flex:1;font-size:13px;font-weight:700}
+.p-badge{font-size:9px;padding:2px 6px;border-radius:4px;font-style:italic}
+.badge-high{color:var(--accent);background:rgba(0,212,255,.12);border:1px solid rgba(0,212,255,.25)}
+.badge-med{color:var(--amber);background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.25)}
+.badge-low{color:#a78bfa;background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.25)}
+.drag-handle{color:var(--muted)}
+.bat-row{display:flex;gap:7px;align-items:center}
+.bat-input,.cfg-input{background:var(--s2);border:1px solid var(--border);border-radius:6px;
+  color:var(--text);font-family:var(--TNR);font-size:13px;outline:none;transition:border-color .2s}
+.bat-input{flex:1;padding:8px 11px;font-size:14px}
+.bat-unit{font-size:11px;color:var(--muted);white-space:nowrap}
+.cfg-input{width:70px;padding:5px 7px;text-align:center}
+.bat-input:focus,.cfg-input:focus{border-color:var(--accent)}
+.cfg-row{display:flex;align-items:center;gap:7px;margin-top:7px;flex-wrap:wrap}
+.cfg-row label{font-size:11px;color:var(--muted);flex:1 1 100%;font-style:italic}
+.cfg-unit{font-size:10px;color:var(--muted)}
+.bat-info{font-size:10px;color:var(--muted);margin-top:8px;line-height:1.55;font-style:italic;
+  background:rgba(0,212,255,.04);border-left:2px solid var(--accent);padding:5px 8px;border-radius:0 4px 4px 0}
+.md-badge{display:inline-block;font-size:10px;padding:2px 8px;border-radius:4px;
+  background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3);color:var(--red);
+  font-style:italic;margin-left:5px}
+.run-btn{width:100%;padding:12px;background:linear-gradient(135deg,var(--accent2),#4f46e5);
+  border:none;border-radius:10px;color:#fff;font-family:var(--TNR);font-size:15px;font-weight:700;
+  cursor:pointer;transition:all .3s;letter-spacing:.3px}
+.run-btn:hover{transform:translateY(-1px);box-shadow:0 8px 25px rgba(124,58,237,.45)}
+.run-btn:active{transform:translateY(0)}
+.run-btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+.status-bar{display:flex;align-items:center;gap:8px;padding:8px 12px;
+  background:var(--s2);border:1px solid var(--border);border-radius:8px;
+  font-size:11px;color:var(--muted);font-style:italic}
+.sdot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex-shrink:0}
+.sdot.active{background:var(--green);box-shadow:0 0 6px var(--green);animation:blink 2s infinite}
+.sdot.loading{background:var(--accent);box-shadow:0 0 6px var(--accent);animation:blink .7s infinite}
+.sdot.error{background:var(--red);box-shadow:0 0 6px var(--red)}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+.spinner{display:none;width:13px;height:13px;border:2px solid var(--border);
+  border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;flex-shrink:0}
+@keyframes spin{to{transform:rotate(360deg)}}
+input[type=color]{width:0;height:0;opacity:0;position:absolute}
+
+/* ── Pipeline status (sidebar bottom) ───────────────────────────────────── */
+.pl-row{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted);
+  padding:4px 0;font-style:italic}
+.pl-dot{width:7px;height:7px;border-radius:50%;background:var(--border);flex-shrink:0;
+  transition:background .3s}
+.pl-dot.done{background:var(--green);box-shadow:0 0 5px var(--green)}
+.pl-dot.active{background:var(--accent);box-shadow:0 0 5px var(--accent);animation:blink .8s infinite}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   MAIN CONTENT  (Manager's exact content CSS + tab system)
+   ══════════════════════════════════════════════════════════════════════════ */
+.content{overflow-y:auto;display:flex;flex-direction:column}
+
+/* Tab navigation */
+.tab-nav{display:flex;gap:0;border-bottom:1px solid var(--border);
+  background:rgba(17,24,39,.9);backdrop-filter:blur(6px);
+  position:sticky;top:57px;z-index:10;padding:0 24px}
+.tab-btn{padding:13px 22px;background:transparent;border:none;
+  border-bottom:2px solid transparent;color:var(--muted);font-family:var(--TNR);
+  font-size:13px;font-style:italic;cursor:pointer;transition:all .2s;white-space:nowrap}
+.tab-btn:hover{color:var(--text)}
+.tab-btn.active{color:var(--accent);border-bottom-color:var(--accent);background:rgba(0,212,255,.06)}
+.tab-panel{display:none;padding:20px 24px;flex-direction:column;gap:18px}
+.tab-panel.active{display:flex}
+
+/* Manager's exact content styles */
+.kpi-row{display:grid;grid-template-columns:repeat(5,1fr);gap:11px}
+.kpi-card{background:var(--s1);border:1px solid var(--border);border-radius:12px;
+  padding:14px 17px;position:relative;overflow:hidden}
+.kpi-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px}
+.kpi-card.c-a::before{background:var(--muted)}.kpi-card.c-b::before{background:var(--green)}
+.kpi-card.c-c::before{background:var(--accent)}.kpi-card.c-d::before{background:var(--dis)}
+.kpi-card.c-e::before{background:var(--md)}
+/* Extra colour variants for Predictor/Calculator/PowerRECO */
+.kpi-card.c-cyan::before{background:var(--accent)}.kpi-card.c-green::before{background:var(--green)}
+.kpi-card.c-amber::before{background:var(--amber)}.kpi-card.c-red::before{background:var(--red)}
+.kpi-card.c-orange::before{background:var(--dis)}.kpi-card.c-purple::before{background:var(--accent2)}
+.kpi-label{font-size:10px;letter-spacing:1.5px;text-transform:uppercase;
+  color:var(--muted);margin-bottom:8px;font-style:italic}
+.kpi-value{font-size:24px;font-weight:700;line-height:1}
+.kpi-unit{font-size:12px;font-weight:400;color:var(--muted);margin-left:3px}
+.kpi-sub{font-size:11px;color:var(--muted);margin-top:3px;font-style:italic}
+.chart-panel{background:var(--s1);border:1px solid var(--border);border-radius:13px;padding:18px 20px}
+.panel-hdr{display:flex;align-items:flex-start;justify-content:space-between;
+  margin-bottom:14px;gap:10px;flex-wrap:wrap}
+.panel-title{font-size:14px;font-weight:700}
+.panel-sub{font-size:11px;color:var(--muted);margin-top:3px;font-style:italic}
+.legend-pills{display:flex;gap:9px;flex-wrap:wrap;justify-content:flex-end}
+.pill{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--muted);font-style:italic}
+.pill-dot{width:8px;height:8px;border-radius:50%}
+.chart-wrap{position:relative;width:100%}
+.soc-row{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.soc-gauge-wrap{flex:1}
+.soc-gauge-track{height:10px;background:var(--border);border-radius:5px;overflow:hidden}
+.soc-gauge-fill{height:100%;border-radius:5px;transition:width .5s;background:var(--green)}
+.soc-labels{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);
+  margin-top:3px;font-style:italic}
+.soc-pct{font-size:18px;font-weight:700;color:var(--green);min-width:55px;text-align:right}
+.bat-detail-row{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-top:12px}
+.bat-detail-card{background:var(--s2);border:1px solid var(--border);border-radius:9px;padding:10px 12px}
+.bdc-label{font-size:10px;color:var(--muted);margin-bottom:4px;font-style:italic}
+.bdc-value{font-size:16px;font-weight:700}
+.bdc-unit{font-size:11px;color:var(--muted);margin-left:3px;font-weight:400}
+.empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:9px;height:200px;color:var(--muted);font-size:13px;
+  border:1px dashed var(--border);border-radius:10px;font-style:italic}
+.empty-icon{font-size:36px;opacity:.3}
+.action-panel{background:var(--s1);border:1px solid var(--border);border-radius:13px}
+.action-header{padding:14px 20px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.action-header-title{font-size:14px;font-weight:700;flex:1}
+.action-filter{display:flex;gap:5px;flex-wrap:wrap}
+.filter-btn{font-family:var(--TNR);font-size:10px;padding:3px 11px;border-radius:20px;
+  cursor:pointer;transition:all .2s;border:1px solid var(--border);
+  background:transparent;color:var(--muted);font-style:italic}
+.filter-btn:hover,.filter-btn.active{border-color:var(--accent);color:var(--accent);background:rgba(0,212,255,.08)}
+.filter-btn.f-dis.active{border-color:var(--dis);color:var(--dis);background:rgba(249,115,22,.08)}
+.filter-btn.f-chg.active{border-color:var(--chg);color:var(--chg);background:rgba(34,197,94,.08)}
+.action-table-wrap{overflow-x:auto;max-height:300px;overflow-y:auto}
+.action-table{width:100%;border-collapse:collapse;font-size:12px}
+.action-table th{position:sticky;top:0;background:var(--s2);padding:8px 12px;text-align:left;
+  font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);
+  border-bottom:1px solid var(--border);font-style:italic}
+.action-table td{padding:7px 12px;border-bottom:1px solid rgba(31,47,74,.5);vertical-align:middle}
+.action-table tr:hover td{background:rgba(0,212,255,.025)}
+.type-badge{display:inline-block;font-size:9px;padding:2px 7px;border-radius:4px;
+  font-weight:700;font-style:italic;white-space:nowrap}
+.tb-lr{background:rgba(0,180,216,.15);color:#00b4d8;border:1px solid rgba(0,180,216,.3)}
+.tb-dis{background:rgba(249,115,22,.15);color:var(--dis);border:1px solid rgba(249,115,22,.3)}
+.tb-chg{background:rgba(34,197,94,.15);color:var(--chg);border:1px solid rgba(34,197,94,.3)}
+.tb-chg-em{background:rgba(239,68,68,.15);color:var(--red);border:1px solid rgba(239,68,68,.3)}
+.no-actions{padding:36px;text-align:center;color:var(--muted);font-size:13px;font-style:italic}
+
+/* ── Shared form controls (Predictor / Calculator / PowerRECO) ──────────── */
+.form-grid{display:grid;gap:11px;grid-template-columns:repeat(3,1fr)}
+.form-grid-2{grid-template-columns:repeat(2,1fr)}
+.form-grid-4{grid-template-columns:repeat(4,1fr)}
+.form-group{display:flex;flex-direction:column;gap:5px}
+.form-label{font-size:10px;color:var(--muted);font-style:italic;
+  letter-spacing:.5px;text-transform:uppercase}
+input[type=number],input[type=text]{background:var(--s2);border:1px solid var(--border);
+  border-radius:8px;color:var(--text);font-family:var(--TNR);font-size:13px;
+  padding:8px 11px;outline:none;width:100%;transition:border-color .2s}
+input[type=number]:focus,input[type=text]:focus{border-color:var(--accent)}
+.range-row{display:flex;align-items:center;gap:8px}
+.range-val{font-size:12px;color:var(--accent);min-width:38px;text-align:right;font-style:italic}
+.checkbox-label{display:flex;align-items:center;gap:8px;font-size:12px;
+  color:var(--muted);cursor:pointer;font-style:italic;margin-top:4px}
+.checkbox-label input[type=checkbox]{width:auto;accent-color:var(--accent)}
+.section-box{background:var(--s1);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+.section-box-title{font-size:12px;font-weight:700;color:var(--accent);
+  letter-spacing:1px;text-transform:uppercase;margin-bottom:12px;font-style:italic}
+
+/* ── Predictor-specific ──────────────────────────────────────────────────── */
+.pred-btn-row{display:flex;gap:9px;flex-wrap:wrap}
+.pred-btn{padding:10px 22px;border:none;border-radius:9px;font-family:var(--TNR);
+  font-size:13px;font-weight:700;cursor:pointer;transition:all .3s;color:#fff}
+.pred-btn.primary{background:linear-gradient(135deg,var(--accent2),#4f46e5)}
+.pred-btn.primary:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(124,58,237,.4)}
+.pred-btn.secondary{background:linear-gradient(135deg,#0e7490,#0891b2)}
+.pred-btn.secondary:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(8,145,178,.35)}
+.pred-btn.ghost{background:transparent;border:1px solid var(--border);color:var(--muted)}
+.pred-btn.ghost:hover{border-color:var(--accent);color:var(--accent)}
+.pred-btn:disabled{opacity:.4;cursor:not-allowed;transform:none !important}
+.kpi-row-4{grid-template-columns:repeat(4,1fr)}
+.kpi-row-3{grid-template-columns:repeat(3,1fr)}
+
+/* ── Calculator-specific ─────────────────────────────────────────────────── */
+.bill-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:11px}
+.bill-card{border-radius:14px;padding:22px 24px 18px;color:#fff;position:relative;overflow:hidden}
+.bill-card-gross{background:linear-gradient(135deg,#1a2f4a,#0d5f9e);border:1px solid rgba(0,212,255,.3)}
+.bill-card-net{background:linear-gradient(135deg,#1a3e25,#1d7a45);border:1px solid rgba(34,197,94,.3)}
+.bill-card-save{background:linear-gradient(135deg,#2e1a5e,#5b21b6);border:1px solid rgba(124,58,237,.4)}
+.bill-total{font-size:2.3rem;font-weight:800;letter-spacing:-1px;line-height:1.1}
+.bill-sub{font-size:.82rem;opacity:.75;text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px}
+.tariff-pill{display:inline-block;background:rgba(255,255,255,.2);border-radius:20px;
+  padding:3px 14px;font-size:.82rem;font-weight:600;margin-top:8px}
+.detect-badge{background:rgba(0,212,255,.07);border-left:3px solid var(--accent);
+  border-radius:0 8px 8px 0;padding:9px 14px;font-size:12px;font-style:italic;margin-bottom:6px}
+.data-table{width:100%;border-collapse:collapse;font-size:12px}
+.data-table th{background:var(--s2);padding:8px 12px;text-align:left;
+  font-size:10px;letter-spacing:1.2px;text-transform:uppercase;color:var(--accent);
+  font-style:italic;position:sticky;top:0}
+.data-table td{padding:7px 12px;border-bottom:1px solid var(--border)}
+.data-table tr:hover td{background:rgba(0,212,255,.03)}
+.table-wrap{overflow-x:auto;max-height:320px;overflow-y:auto;
+  border-radius:8px;border:1px solid var(--border)}
+
+/* ── PowerRECO-specific ──────────────────────────────────────────────────── */
+.reco-box{background:rgba(0,212,255,.07);border:1px solid rgba(0,212,255,.3);
+  border-radius:10px;padding:13px 16px;margin:6px 0;font-size:12px}
+.good-box{background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.3);
+  border-radius:10px;padding:13px 16px;margin:6px 0;font-size:12px}
+.warn-box{background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.3);
+  border-radius:10px;padding:13px 16px;margin:6px 0;font-size:12px}
+
+/* ── Alerts / toast ──────────────────────────────────────────────────────── */
+.alert{padding:9px 13px;border-radius:8px;font-size:12px;font-style:italic;margin:4px 0}
+.alert-info{background:rgba(0,212,255,.07);border:1px solid rgba(0,212,255,.25);border-left:3px solid var(--accent)}
+.alert-ok{background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);border-left:3px solid var(--green)}
+.alert-warn{background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.25);border-left:3px solid var(--amber)}
+.alert-err{background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.25);border-left:3px solid var(--red)}
+#toast{position:fixed;bottom:24px;right:24px;z-index:999;
+  padding:11px 20px;border-radius:10px;font-size:13px;font-family:var(--TNR);
+  background:var(--s1);border:1px solid var(--border);box-shadow:0 8px 30px rgba(0,0,0,.5);
+  display:none;animation:slideUp .3s ease}
+@keyframes slideUp{from{transform:translateY(16px);opacity:0}to{transform:translateY(0);opacity:1}}
+
+/* ── Download button ─────────────────────────────────────────────────────── */
+.dl-btn{padding:7px 18px;background:transparent;border:1px solid var(--border);border-radius:8px;
+  color:var(--muted);font-family:var(--TNR);font-size:12px;cursor:pointer;
+  transition:all .2s;font-style:italic;text-decoration:none;display:inline-block}
+.dl-btn:hover{border-color:var(--accent);color:var(--accent)}
+
+/* ── Scrollbar ───────────────────────────────────────────────────────────── */
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--muted)}
+</style>
+</head>
+<body>
+
+<!-- ══ HEADER ══════════════════════════════════════════════════════════════ -->
+<header>
+  <div class="logo-wrap">
+    <div class="logo-icon">⚡</div>
+    <div>
+      <div class="logo-title"><span>BOLT</span> Integrated</div>
+      <div class="logo-sub">Predictor → AI Manager → Bill Calculator → PowerRECO · Peak Shaving &amp; Load Shifting</div>
+    </div>
+  </div>
+  <div class="hdr-right">
+    <div class="server-dot" id="serverDot" title="Server connection"></div>
+    <div class="hdr-badge">v1 · Unified AI Pipeline</div>
+  </div>
+</header>
+
+<div class="layout">
+
+<!-- ══ SIDEBAR ══════════════════════════════════════════════════════════════
+     Manager's exact sidebar — preserved verbatim from Manager/index.html
+     Additional: pipeline status section at bottom
+     ══════════════════════════════════════════════════════════════════════ -->
+<aside class="sidebar">
+
+  <!-- Data Input -->
+  <div>
+    <div class="sec-label">Data Input</div>
+    <div class="upload-zone" id="uploadZone">
+      <input type="file" id="fileInput" accept=".csv,.xlsx,.xls">
+      <div class="upload-icon">📂</div>
+      <strong>Upload Load Profile</strong>
+      <p>CSV or Excel — kW / kVAR import &amp; export<br>30-min interval data (any date range)</p>
+      <div class="file-tag" id="fileName"></div>
+    </div>
+  </div>
+
+  <!-- View Day -->
+  <div>
+    <div class="sec-label">View Day</div>
+    <select id="dateSelect">
+      <option value="all">— All Dates (full dataset) —</option>
+    </select>
+  </div>
+
+  <!-- Load Types -->
+  <div>
+    <div class="sec-label">Load Types</div>
+    <p style="font-size:10px;color:var(--muted);margin-bottom:8px;font-style:italic">
+      Define each load type, its share of total demand, and how much can be cut.
+    </p>
+    <div id="loadCardList"></div>
+    <button class="add-load-btn" onclick="addLoad()">+ Add Load Type</button>
+    <div class="prop-total ok" id="propTotal" style="margin-top:6px">Total: 100% ✓</div>
+  </div>
+
+  <!-- Priority Order -->
+  <div>
+    <div class="sec-label">Load Priority Order</div>
+    <p style="font-size:10px;color:var(--muted);margin-bottom:7px;font-style:italic">
+      Drag to reorder. Top = highest priority = cut last. Battery discharges first.
+    </p>
+    <div class="priority-list" id="priorityList"></div>
+  </div>
+
+  <!-- Battery Storage -->
+  <div>
+    <div class="sec-label">Battery Storage</div>
+    <div class="bat-row">
+      <input type="number" class="bat-input" id="batterySize" value="200" min="0" step="10">
+      <span class="bat-unit">kWh capacity</span>
+    </div>
+    <div class="cfg-row">
+      <label>C-rate (0.5 = 0.5C, typical LFP)</label>
+      <input type="number" class="cfg-input" id="cRate" value="0.5" min="0.1" max="2.0" step="0.1">
+      <span class="cfg-unit">C</span>
+    </div>
+    <div class="cfg-row">
+      <label>Initial SOC (first interval)</label>
+      <input type="number" class="cfg-input" id="initialSoc" value="50" min="5" max="100" step="5">
+      <span class="cfg-unit">%</span>
+    </div>
+    <div class="cfg-row">
+      <label>Peak target — stay below this % of reference peak</label>
+      <input type="number" class="cfg-input" id="peakTarget" value="85" min="50" max="99" step="1">
+      <span class="cfg-unit">%</span>
+    </div>
+    <div class="cfg-row">
+      <label>Charge upper threshold — charge only when kVA below</label>
+      <input type="number" class="cfg-input" id="chargeUpper" value="70" min="30" max="99" step="1">
+      <span class="cfg-unit">% of peak</span>
+    </div>
+    <div class="cfg-row">
+      <label>Peak reference ceiling (blank = auto 30-day rolling max)</label>
+      <input type="number" class="cfg-input" id="peakRefKva" value="" min="0" step="10" placeholder="auto">
+      <span class="cfg-unit">kVA</span>
+    </div>
+    <div class="cfg-row">
+      <label>Look-ahead window (default 16 = 8 hours)</label>
+      <input type="number" class="cfg-input" id="lookahead" value="16" min="0" max="48" step="1">
+      <span class="cfg-unit">× 30 min</span>
+    </div>
+    <div class="bat-info">
+      <strong>MD Peak Hours</strong><span class="md-badge" id="mdBadgeLabel">14:00–22:00</span><br>
+      Discharge proximity drops to 70% inside MD hours (more aggressive pre-discharge).<br>
+      Normal charging is <em>blocked</em> during MD hours — only emergency charging allowed.<br>
+      Battery charges off-peak to be ready for the 14:00–22:00 window.
+    </div>
+    <div class="cfg-row" style="margin-top:8px">
+      <label>MD peak window start / end hour (24h)</label>
+      <input type="number" class="cfg-input" id="mdStart" value="14" min="0" max="23" step="1">
+      <span class="cfg-unit">to</span>
+      <input type="number" class="cfg-input" id="mdEnd" value="22" min="1" max="24" step="1">
+      <span class="cfg-unit">h</span>
+    </div>
+    <div class="cfg-row">
+      <label>Battery one-way efficiency (charge &amp; discharge η)</label>
+      <input type="number" class="cfg-input" id="batEfficiency" value="95" min="50" max="100" step="1">
+      <span class="cfg-unit">%</span>
+    </div>
+    <div class="cfg-row">
+      <label>Pre-MD charge boost — charge freely N hours before MD start</label>
+      <input type="number" class="cfg-input" id="preMdHours" value="2" min="0" max="6" step="0.5">
+      <span class="cfg-unit">h</span>
+    </div>
+  </div>
+
+  <button class="run-btn" id="runBtn" disabled>⚡ Run AI Manager</button>
+  <div class="status-bar">
+    <div class="sdot" id="statusDot"></div>
+    <div class="spinner" id="spinner"></div>
+    <span id="statusMsg">Upload a dataset to begin</span>
+  </div>
+
+  <!-- Pipeline Status -->
+  <div>
+    <div class="sec-label">Pipeline</div>
+    <div class="pl-row"><div class="pl-dot" id="pl-data"></div>1 · Data loaded</div>
+    <div class="pl-row"><div class="pl-dot" id="pl-predictor"></div>2 · Forecaster trained</div>
+    <div class="pl-row"><div class="pl-dot" id="pl-forecast"></div>3 · Forecast generated</div>
+    <div class="pl-row"><div class="pl-dot" id="pl-manager"></div>4 · Manager optimised</div>
+    <div class="pl-row"><div class="pl-dot" id="pl-calculator"></div>5 · Bills calculated</div>
+    <div class="pl-row"><div class="pl-dot" id="pl-powerreco"></div>6 · PowerRECO done</div>
+  </div>
+
+</aside>
+
+<!-- ══ MAIN CONTENT ══════════════════════════════════════════════════════════ -->
+<main class="content">
+
+  <!-- Tab navigation -->
+  <nav class="tab-nav">
+    <button class="tab-btn active" data-tab="manager">⚙️ AI Manager</button>
+    <button class="tab-btn" data-tab="predictor">📈 Predictor</button>
+    <button class="tab-btn" data-tab="calculator">💰 Bill Calculator</button>
+    <button class="tab-btn" data-tab="powerreco">🌞 PowerRECO</button>
+  </nav>
+
+  <!-- ══════════════════════════════════════════════════════════════════════
+       TAB 1 — AI MANAGER
+       Manager's exact main content — preserved verbatim from Manager/index.html
+       ══════════════════════════════════════════════════════════════════════ -->
+  <div class="tab-panel active" id="tab-manager">
+
+    <!-- KPI row -->
+    <div class="kpi-row" id="kpiRow" style="display:none">
+      <div class="kpi-card c-a">
+        <div class="kpi-label">Original Peak kVA</div>
+        <div class="kpi-value"><span id="kpiOrig">—</span><span class="kpi-unit">kVA</span></div>
+        <div class="kpi-sub">Before optimisation</div>
+      </div>
+      <div class="kpi-card c-b">
+        <div class="kpi-label">Managed Peak kVA</div>
+        <div class="kpi-value"><span id="kpiManaged">—</span><span class="kpi-unit">kVA</span></div>
+        <div class="kpi-sub">After AI management</div>
+      </div>
+      <div class="kpi-card c-c">
+        <div class="kpi-label">Peak Reduction</div>
+        <div class="kpi-value"><span id="kpiRed">—</span><span class="kpi-unit">%</span></div>
+        <div class="kpi-sub">MD charge saving</div>
+      </div>
+      <div class="kpi-card c-d">
+        <div class="kpi-label">Battery Discharged</div>
+        <div class="kpi-value"><span id="kpiBatDis">—</span><span class="kpi-unit">kWh</span></div>
+        <div class="kpi-sub">Total peak shaving</div>
+      </div>
+      <div class="kpi-card c-e">
+        <div class="kpi-label">MD Peak Reduction</div>
+        <div class="kpi-value"><span id="kpiMdRed">—</span><span class="kpi-unit">%</span></div>
+        <div class="kpi-sub" id="kpiMdSub">14:00–22:00 window</div>
+      </div>
+    </div>
+
+    <!-- Input chart -->
+    <div class="chart-panel">
+      <div class="panel-hdr">
+        <div>
+          <div class="panel-title">Input Load Profile — Raw Data</div>
+          <div class="panel-sub">30-min kVA · grey = raw kVA · dashed = kW net · red band = MD hours</div>
+        </div>
+        <div class="legend-pills">
+          <span class="pill"><span class="pill-dot" style="background:#94a3b8"></span>kVA raw</span>
+          <span class="pill"><span class="pill-dot" style="background:rgba(0,180,216,.6)"></span>kW net</span>
+          <span class="pill"><span class="pill-dot" style="background:rgba(239,68,68,.25);width:14px;height:8px;border-radius:2px"></span>MD hrs</span>
+        </div>
+      </div>
+      <div class="chart-wrap" style="height:200px">
+        <canvas id="inputChart"></canvas>
+        <div class="empty-state" id="inputEmpty"><div class="empty-icon">📂</div><span>Upload a dataset to display</span></div>
+      </div>
+    </div>
+
+    <!-- Output chart -->
+    <div class="chart-panel">
+      <div class="panel-hdr">
+        <div>
+          <div class="panel-title">Optimised Load — AI Manager Output</div>
+          <div class="panel-sub">Stacked bars = managed load breakdown · Lines = before / after / target</div>
+        </div>
+        <div class="legend-pills" id="outLegend" style="display:none">
+          <span class="pill"><span class="pill-dot" style="background:var(--chg)"></span>Bat Charge</span>
+          <span class="pill"><span class="pill-dot" style="background:var(--dis)"></span>Bat Discharge</span>
+          <span class="pill"><span class="pill-dot" style="background:#94a3b8;width:14px;height:2px;border-radius:1px"></span>Original</span>
+          <span class="pill"><span class="pill-dot" style="background:var(--green);width:14px;height:2px;border-radius:1px"></span>Managed</span>
+          <span class="pill"><span class="pill-dot" style="background:var(--red);width:14px;height:2px;border-radius:1px"></span>Target</span>
+        </div>
+      </div>
+      <div class="chart-wrap" style="height:280px">
+        <canvas id="outputChart"></canvas>
+        <div class="empty-state" id="outputEmpty"><div class="empty-icon">⚡</div><span>Run optimisation to view results</span></div>
+      </div>
+    </div>
+
+    <!-- Battery chart -->
+    <div class="chart-panel">
+      <div class="panel-hdr">
+        <div>
+          <div class="panel-title">Battery — State of Charge &amp; Power Flow</div>
+          <div class="panel-sub">SOC kWh (left) · Charge / Discharge kW (right, per 30-min interval)</div>
+        </div>
+        <div class="legend-pills">
+          <span class="pill"><span class="pill-dot" style="background:var(--green)"></span>SOC kWh</span>
+          <span class="pill"><span class="pill-dot" style="background:var(--chg)"></span>Charging kW</span>
+          <span class="pill"><span class="pill-dot" style="background:var(--dis)"></span>Discharging kW</span>
+          <span class="pill"><span class="pill-dot" style="background:var(--red)"></span>Emergency Chg</span>
+        </div>
+      </div>
+      <div class="soc-row" id="socGaugeRow" style="display:none">
+        <div style="font-size:11px;color:var(--muted);font-style:italic;white-space:nowrap">End SOC</div>
+        <div class="soc-gauge-wrap">
+          <div class="soc-gauge-track"><div class="soc-gauge-fill" id="socFill" style="width:50%"></div></div>
+          <div class="soc-labels"><span>0%</span><span>20%</span><span>90%</span><span>100%</span></div>
+        </div>
+        <div class="soc-pct" id="socPct">—</div>
+      </div>
+      <div class="chart-wrap" style="height:200px">
+        <canvas id="batteryChart"></canvas>
+        <div class="empty-state" id="batEmpty"><div class="empty-icon">🔋</div><span>Run optimisation to view battery behaviour</span></div>
+      </div>
+      <div class="bat-detail-row" id="batDetailRow" style="display:none">
+        <div class="bat-detail-card">
+          <div class="bdc-label">⬆ Total Charged</div>
+          <div class="bdc-value"><span id="bdcChg">—</span><span class="bdc-unit">kWh</span></div>
+        </div>
+        <div class="bat-detail-card">
+          <div class="bdc-label">⬇ Total Discharged</div>
+          <div class="bdc-value"><span id="bdcDis">—</span><span class="bdc-unit">kWh</span></div>
+        </div>
+        <div class="bat-detail-card">
+          <div class="bdc-label">⚠ Emergency Charges</div>
+          <div class="bdc-value"><span id="bdcEmerg">—</span><span class="bdc-unit">intervals</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Curtailment summary -->
+    <div class="action-panel" id="curtailPanel" style="display:none">
+      <div class="action-header">
+        <div class="action-header-title">📊 Curtailment Summary — kVAh Cut Per Load Type</div>
+        <div style="font-size:11px;color:var(--muted);font-style:italic">Per-day apparent energy curtailed · Key MD charge justification metric</div>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="action-table" id="curtailTable">
+          <thead id="curtailHead"></thead>
+          <tbody id="curtailTbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Action log -->
+    <div class="action-panel" id="actionPanel" style="display:none">
+      <div class="action-header">
+        <div class="action-header-title">🔍 AI Manager — Optimisation Action Log</div>
+        <div class="action-filter">
+          <button class="filter-btn active" data-filter="all">All</button>
+          <button class="filter-btn f-load" data-filter="load_reduction">Load Cuts</button>
+          <button class="filter-btn f-dis"  data-filter="battery_discharge">Discharge</button>
+          <button class="filter-btn f-chg"  data-filter="battery_charge">Charge</button>
+        </div>
+      </div>
+      <div class="action-table-wrap">
+        <table class="action-table">
+          <thead><tr>
+            <th>Time</th><th>Type</th><th>Component</th>
+            <th>kVA Before</th><th>Δ kW</th><th>kVA After</th>
+            <th>Battery SOC</th><th>Detail</th><th>Note</th>
+          </tr></thead>
+          <tbody id="actionTbody"></tbody>
+        </table>
+        <div class="no-actions" id="noActions" style="display:none">No actions match this filter.</div>
+      </div>
+    </div>
+
+  </div><!-- /tab-manager -->
+
+  <!-- ══════════════════════════════════════════════════════════════════════
+       TAB 2 — PREDICTOR  (LightGBM load forecaster — from Predictor/app.py)
+       ══════════════════════════════════════════════════════════════════════ -->
+  <div class="tab-panel" id="tab-predictor">
+
+    <div class="section-box">
+      <div class="section-box-title">Model Configuration</div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label class="form-label">Solar capacity (kWp) — 0 if no solar</label>
+          <input type="number" id="pred-kwp" value="0" min="0" step="10">
+        </div>
+        <div class="form-group">
+          <label class="form-label">LightGBM boosting rounds</label>
+          <input type="number" id="pred-rounds" value="250" min="50" max="1000" step="50">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Learning rate</label>
+          <input type="number" id="pred-lr" value="0.05" min="0.005" max="0.3" step="0.005">
+        </div>
+      </div>
+    </div>
+
+    <div class="pred-btn-row">
+      <button class="pred-btn primary" id="btn-train" onclick="trainPredictor()">🧠 Train Forecaster</button>
+      <button class="pred-btn secondary" id="btn-forecast" onclick="runForecast()" disabled>📈 Generate 24h Forecast</button>
+      <button class="pred-btn ghost" id="btn-cv" onclick="runCV()" disabled>🔁 Cross-Validate</button>
+    </div>
+
+    <div id="pred-alert"></div>
+
+    <!-- Training KPIs -->
+    <div id="pred-kpis" style="display:none">
+      <div class="kpi-row kpi-row-4" id="kpiPredictor"></div>
+    </div>
+
+    <!-- Forecast chart -->
+    <div class="chart-panel" id="pred-chart-panel" style="display:none">
+      <div class="panel-hdr">
+        <div>
+          <div class="panel-title">48-Step Ahead Forecast (24 hours)</div>
+          <div class="panel-sub">Historical tail (dotted grey) · P10–P90 band (fill) · Median forecast (cyan)</div>
+        </div>
+        <div class="legend-pills">
+          <span class="pill"><span class="pill-dot" style="background:#6b7a9a"></span>Historical</span>
+          <span class="pill"><span class="pill-dot" style="background:rgba(0,212,255,.4);width:14px;height:8px;border-radius:2px"></span>P10–P90</span>
+          <span class="pill"><span class="pill-dot" style="background:var(--accent)"></span>Median</span>
+        </div>
+      </div>
+      <div class="chart-wrap" style="height:300px"><canvas id="predChart"></canvas></div>
+    </div>
+
+    <!-- Top peaks table -->
+    <div class="chart-panel" id="peaks-panel" style="display:none">
+      <div class="panel-hdr">
+        <div class="panel-title">Top 3 Predicted Demand Peaks</div>
+        <div class="panel-sub">Highest forecast intervals with confidence bounds</div>
+      </div>
+      <div class="table-wrap"><table class="data-table" id="peaksTable"></table></div>
+    </div>
+
+    <!-- CV result -->
+    <div class="chart-panel" id="cv-panel" style="display:none">
+      <div class="panel-hdr">
+        <div class="panel-title">Cross-Validation Report</div>
+        <div class="panel-sub">Expanding-window hold-out · 4 folds · 5-day validation blocks</div>
+      </div>
+      <pre id="cv-text" style="font-size:12px;color:var(--muted);white-space:pre-wrap;line-height:1.6;font-family:var(--TNR)"></pre>
+    </div>
+
+  </div><!-- /tab-predictor -->
+
+  <!-- ══════════════════════════════════════════════════════════════════════
+       TAB 3 — BILL CALCULATOR  (TNB tariff engine — from SAM_CALCULATOR/app.py)
+       ══════════════════════════════════════════════════════════════════════ -->
+  <div class="tab-panel" id="tab-calculator">
+
+    <div class="section-box">
+      <div class="section-box-title">Tariff &amp; Billing Settings</div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label class="form-label">Tariff category</label>
+          <select id="calc-tariff"></select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">ICPT (sen/kWh) — positive = surcharge, negative = rebate</label>
+          <input type="number" id="calc-icpt" value="0" min="-20" max="30" step="0.5">
+        </div>
+        <div class="form-group">
+          <label class="form-label">NEM buyback rate (RM/kWh)</label>
+          <input type="number" id="calc-nem" value="0.31" min="0.10" max="0.60" step="0.01">
+        </div>
+      </div>
+    </div>
+
+    <button class="run-btn" id="btn-calc" onclick="runCalculator()" style="width:auto;padding:11px 32px">💰 Calculate Bills</button>
+
+    <div id="calc-alert"></div>
+    <div id="calc-detect" style="display:none"></div>
+
+    <!-- Bill summary cards -->
+    <div id="calc-cards" style="display:none">
+      <div class="bill-cards" id="billCards"></div>
+    </div>
+
+    <!-- Monthly comparison chart -->
+    <div class="chart-panel" id="calc-chart-panel" style="display:none">
+      <div class="panel-hdr">
+        <div class="panel-title">Monthly Bill Comparison — Before vs After Optimisation</div>
+        <div class="panel-sub">Red = before AI Manager · Green = after optimisation</div>
+      </div>
+      <div class="chart-wrap" style="height:260px"><canvas id="calcChart"></canvas></div>
+    </div>
+
+    <!-- Monthly breakdown table -->
+    <div class="action-panel" id="calc-table-panel" style="display:none">
+      <div class="action-header">
+        <div class="action-header-title">📋 Monthly Bill Breakdown (After Optimisation)</div>
+      </div>
+      <div class="table-wrap"><table class="data-table" id="billTable"></table></div>
+    </div>
+
+  </div><!-- /tab-calculator -->
+
+  <!-- ══════════════════════════════════════════════════════════════════════
+       TAB 4 — POWERRECO  (Solar & battery sizing + ROI — from PowerRECO/app.py)
+       ══════════════════════════════════════════════════════════════════════ -->
+  <div class="tab-panel" id="tab-powerreco">
+
+    <!-- Site parameters -->
+    <div class="section-box">
+      <div class="section-box-title">Site &amp; System Parameters</div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label class="form-label">Roof area (m²)</label>
+          <input type="number" id="pr-roof" value="500" min="50" max="50000" step="50">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Panel wattage (W)</label>
+          <input type="number" id="pr-panel" value="415" min="200" max="800" step="5">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Peak sun hours / day</label>
+          <input type="number" id="pr-psh" value="4.5" min="3.0" max="7.0" step="0.1">
+        </div>
+      </div>
+      <div class="form-grid" style="margin-top:10px">
+        <div class="form-group">
+          <label class="form-label">Solar cost (RM / kWp)</label>
+          <input type="number" id="pr-scost" value="3500" min="1000" max="8000" step="100">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Battery cost (RM / kWh)</label>
+          <input type="number" id="pr-bcost" value="2500" min="500" max="8000" step="100">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Self-consumption: <span id="lbl-sc">65</span>%</label>
+          <div class="range-row">
+            <input type="range" id="pr-sc" min="20" max="95" value="65"
+              oninput="document.getElementById('lbl-sc').textContent=this.value">
+            <span class="range-val" id="sc-val-display">65%</span>
+          </div>
+        </div>
+      </div>
+      <label class="checkbox-label" style="margin-top:12px">
+        <input type="checkbox" id="pr-newmd" checked>
+        Use new MD tariff rate (RM 97.06/kW) — uncheck for legacy RM 30.30/kW
+      </label>
+    </div>
+
+    <!-- Manual battery override (shown when no Manager results) -->
+    <div class="section-box" id="manual-batt-box">
+      <div class="section-box-title">Manual Battery Entry <span style="color:var(--amber);font-size:10px;margin-left:6px">— used if AI Manager has not been run</span></div>
+      <div class="form-grid form-grid-2">
+        <div class="form-group">
+          <label class="form-label">Peak daily discharge target (kWh)</label>
+          <input type="number" id="pr-manual-kwh" value="0" min="0" step="10"
+            placeholder="0 = derive from solar">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Expected MD reduction (kW)</label>
+          <input type="number" id="pr-manual-md" value="0" min="0" step="1">
+        </div>
+      </div>
+    </div>
+
+    <button class="run-btn" id="btn-pr" onclick="runPowerRECO()" style="width:auto;padding:11px 32px">🌞 Run PowerRECO Analysis</button>
+
+    <div id="pr-alert"></div>
+
+    <!-- Solar system KPIs -->
+    <div id="pr-solar" style="display:none">
+      <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--accent);margin-bottom:10px;font-style:italic">
+        ☀️ Solar PV System
+      </div>
+      <div class="kpi-row" id="kpiSolar"></div>
+      <div class="chart-panel" style="margin-top:14px">
+        <div class="panel-hdr">
+          <div class="panel-title">Monthly Solar Generation — Malaysia Seasonal Factors</div>
+          <div class="panel-sub">Estimated based on location irradiance multipliers for Peninsular Malaysia</div>
+        </div>
+        <div class="chart-wrap" style="height:220px"><canvas id="solarChart"></canvas></div>
+      </div>
+    </div>
+
+    <!-- Battery sizing KPIs -->
+    <div id="pr-battery" style="display:none">
+      <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--accent);margin:14px 0 10px;font-style:italic">
+        🔋 Battery Sizing
+      </div>
+      <div class="kpi-row kpi-row-3" id="kpiBattery"></div>
+      <div id="batt-note" style="margin-top:8px"></div>
+    </div>
+
+    <!-- ROI KPIs + NPV chart -->
+    <div id="pr-roi" style="display:none">
+      <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--accent);margin:14px 0 10px;font-style:italic">
+        💰 25-Year Financial Return
+      </div>
+      <div class="kpi-row" id="kpiROI"></div>
+      <div class="kpi-row kpi-row-3" id="kpiROI2" style="margin-top:11px"></div>
+
+      <div class="chart-panel" style="margin-top:14px">
+        <div class="panel-hdr">
+          <div class="panel-title">Cumulative NPV over 25 Years</div>
+          <div class="panel-sub">Discounted at 6% cost of capital · Zero line = payback crossover</div>
+        </div>
+        <div class="chart-wrap" style="height:280px"><canvas id="npvChart"></canvas></div>
+      </div>
+
+      <div id="pr-verdict" style="margin-top:8px"></div>
+
+      <div style="margin-top:10px">
+        <a class="dl-btn" id="dl-roi" href="#" onclick="downloadROI(event)">⬇ Download ROI Summary (JSON)</a>
+      </div>
+    </div>
+
+  </div><!-- /tab-powerreco -->
+
+</main>
+</div><!-- /layout -->
+
+<div id="toast"></div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   BOLT INTEGRATED — JavaScript
+   Section A: Manager's exact JS (verbatim from Manager/index.html)
+   Section B: Predictor JS
+   Section C: Bill Calculator JS
+   Section D: PowerRECO JS
+   Section E: Shared utilities (status polling, tabs, toast)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+const API = '';   // same-origin Flask server on port 5000
+
+/* ════════════════════════════════════════════════════════════════════════════
+   SECTION A — MANAGER  (exact JS from Manager/index.html, API base changed)
+   ════════════════════════════════════════════════════════════════════════════ */
+
+const COLOR_PALETTE = [
+  '#00b4d8','#f59e0b','#a78bfa','#22c55e',
+  '#f97316','#ec4899','#06b6d4','#84cc16',
+  '#a855f7','#14b8a6','#fb923c','#38bdf8'
+];
+
+let loadTypes = [
+  { key:'ev',   name:'EV Charger',    proportion:30, maxCut:10, color:'#00b4d8' },
+  { key:'hvac', name:'HVAC',          proportion:40, maxCut:15, color:'#f59e0b' },
+  { key:'misc', name:'Miscellaneous', proportion:30, maxCut:20, color:'#a78bfa' },
+];
+let priorityOrder = ['ev','hvac','misc'];
+let rawRecords = [], optResults = [], allActions = [];
+let activeFilter = 'all';
+let inputChartInst = null, outputChartInst = null, batChartInst = null;
+let lastLoadKeys = [];
+let roiData = null; // stored for JSON download
+
+Chart.defaults.color       = '#6b7a9a';
+Chart.defaults.borderColor = '#1f2f4a';
+Chart.defaults.font.family = "'Times New Roman', Times, serif";
+Chart.defaults.font.size   = 11;
+
+/* ── MD Band Plugin ────────────────────────────────────────────────────── */
+const mdBandPlugin = {
+  id: 'mdBand',
+  beforeDraw(chart) {
+    const indices = chart.options.plugins?.mdBand?.indices;
+    if (!indices || !indices.length) return;
+    const { ctx, chartArea, scales } = chart;
+    if (!chartArea || !scales.x) return;
+    const n = chart.data.labels.length;
+    if (!n) return;
+    const bandW = chartArea.width / n;
+    ctx.save();
+    ctx.fillStyle = 'rgba(239,68,68,0.07)';
+    indices.forEach(i => {
+      ctx.fillRect(chartArea.left + i * bandW, chartArea.top, bandW, chartArea.height);
+    });
+    ctx.restore();
+  }
+};
+Chart.register(mdBandPlugin);
+
+/* ── Load cards ────────────────────────────────────────────────────────── */
+function renderLoadCards() {
+  const container = document.getElementById('loadCardList');
+  container.innerHTML = '';
+  loadTypes.forEach(lt => {
+    const card = document.createElement('div');
+    card.className = 'load-card';
+    card.dataset.key = lt.key;
+    card.innerHTML = `
+      <div class="load-card-top">
+        <div class="load-color-dot" style="background:${lt.color}" title="Click to change colour"
+             onclick="pickColor('${lt.key}',this)"></div>
+        <input type="color" id="colorPicker_${lt.key}" value="${lt.color}"
+               onchange="applyColor('${lt.key}',this.value)">
+        <input class="load-name-input" type="text" value="${lt.name}"
+               oninput="updateLoadField('${lt.key}','name',this.value)" placeholder="Load name">
+        <button class="load-remove-btn" onclick="removeLoad('${lt.key}')" title="Remove">×</button>
+      </div>
+      <div class="load-card-row">
+        <div class="load-field">
+          <div class="load-field-label">Proportion</div>
+          <input class="load-number" type="number" value="${lt.proportion}" min="0" max="100" step="1"
+                 oninput="updateLoadField('${lt.key}','proportion',+this.value);checkTotal()">
+          <div class="load-unit">% of total kVA</div>
+        </div>
+        <div class="load-field">
+          <div class="load-field-label">Max Cut</div>
+          <input class="load-number" type="number" value="${lt.maxCut}" min="0" max="100" step="1"
+                 oninput="updateLoadField('${lt.key}','maxCut',+this.value)">
+          <div class="load-unit">% reducible</div>
+        </div>
+      </div>`;
+    container.appendChild(card);
+  });
+  checkTotal();
+  renderPriorityList();
+}
+
+function pickColor(key, dotEl) { document.getElementById('colorPicker_' + key).click(); }
+function applyColor(key, color) {
+  const lt = loadTypes.find(l => l.key === key);
+  if (lt) { lt.color = color; renderLoadCards(); }
+}
+function updateLoadField(key, field, value) {
+  const lt = loadTypes.find(l => l.key === key);
+  if (lt) lt[field] = value;
+  if (field === 'name') renderPriorityList();
+}
+function checkTotal() {
+  const t = loadTypes.reduce((s, l) => s + (+l.proportion || 0), 0);
+  const el = document.getElementById('propTotal');
+  const ok = Math.abs(t - 100) <= 0.5;
+  el.textContent = `Total: ${t}%` + (ok ? ' ✓' : ' — must equal 100');
+  el.className = 'prop-total ' + (ok ? 'ok' : 'warn');
+}
+function addLoad() {
+  const idx = loadTypes.length;
+  const color = COLOR_PALETTE[idx % COLOR_PALETTE.length];
+  const key = 'load_' + Date.now();
+  loadTypes.push({ key, name: 'New Load', proportion: 0, maxCut: 10, color });
+  priorityOrder.push(key);
+  renderLoadCards();
+}
+function removeLoad(key) {
+  if (loadTypes.length <= 1) { alert('At least one load type is required.'); return; }
+  loadTypes     = loadTypes.filter(l => l.key !== key);
+  priorityOrder = priorityOrder.filter(k => k !== key);
+  renderLoadCards();
+}
+
+/* ── Priority list (drag-drop) ─────────────────────────────────────────── */
+function renderPriorityList() {
+  const pList = document.getElementById('priorityList');
+  pList.innerHTML = '';
+  const keys = loadTypes.map(l => l.key);
+  priorityOrder = priorityOrder.filter(k => keys.includes(k));
+  keys.forEach(k => { if (!priorityOrder.includes(k)) priorityOrder.push(k); });
+  priorityOrder.forEach((key, i) => {
+    const lt = loadTypes.find(l => l.key === key);
+    if (!lt) return;
+    const badges = ['badge-high','badge-med','badge-low'];
+    const labels = ['HIGH','MED','LOW'];
+    const bClass = badges[i] || 'badge-low';
+    const bLabel = labels[i] || 'LOW';
+    const item = document.createElement('div');
+    item.className = 'priority-item';
+    item.draggable = true;
+    item.dataset.key = key;
+    item.innerHTML = `
+      <span class="p-rank">${i+1}</span>
+      <span class="p-dot" style="background:${lt.color};box-shadow:0 0 5px ${lt.color}"></span>
+      <span class="p-name">${lt.name}</span>
+      <span class="p-badge ${bClass}">${bLabel}</span>
+      <span class="drag-handle">⠿</span>`;
+    pList.appendChild(item);
+  });
+  // Drag-and-drop
+  let dragEl = null;
+  pList.addEventListener('dragstart', e => {
+    dragEl = e.target.closest('.priority-item');
+    if (dragEl) dragEl.classList.add('dragging');
+  });
+  pList.addEventListener('dragover', e => {
+    e.preventDefault();
+    const over = e.target.closest('.priority-item');
+    if (!over || over === dragEl) return;
+    const items = [...pList.querySelectorAll('.priority-item')];
+    if (items.indexOf(over) < items.indexOf(dragEl)) pList.insertBefore(dragEl, over);
+    else pList.insertBefore(dragEl, over.nextSibling);
+    refreshPriorityRanks();
+  });
+  pList.addEventListener('dragend', () => {
+    if (dragEl) dragEl.classList.remove('dragging');
+    dragEl = null;
+    priorityOrder = [...pList.querySelectorAll('.priority-item')].map(e => e.dataset.key);
+  });
+}
+function refreshPriorityRanks() {
+  const items = [...document.querySelectorAll('#priorityList .priority-item')];
+  const badges = ['badge-high','badge-med','badge-low'];
+  const labels  = ['HIGH','MED','LOW'];
+  items.forEach((el, i) => {
+    el.querySelector('.p-rank').textContent = i + 1;
+    const b = el.querySelector('.p-badge');
+    b.className = 'p-badge ' + (badges[i] || 'badge-low');
+    b.textContent = labels[i] || 'LOW';
+  });
+}
+function getPriorityPayload() {
+  return [...document.querySelectorAll('#priorityList .priority-item')]
+    .map(e => e.dataset.key).slice().reverse();
+}
+function getLoadsPayload() {
+  const obj = {};
+  loadTypes.forEach(lt => {
+    obj[lt.key] = {
+      name:        lt.name,
+      proportion:  (lt.proportion || 0) / 100,
+      max_cut_pct: (lt.maxCut    || 0) / 100,
+      color:       lt.color,
+    };
+  });
+  return obj;
+}
+
+/* ── Upload ────────────────────────────────────────────────────────────── */
+const uploadZone = document.getElementById('uploadZone');
+const fileInput  = document.getElementById('fileInput');
+uploadZone.addEventListener('click',    () => fileInput.click());
+uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('drag'); });
+uploadZone.addEventListener('dragleave',  () => uploadZone.classList.remove('drag'));
+uploadZone.addEventListener('drop', e => {
+  e.preventDefault(); uploadZone.classList.remove('drag');
+  if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => { if (fileInput.files[0]) handleFile(fileInput.files[0]); });
+
+async function handleFile(file) {
+  document.getElementById('fileName').textContent = file.name;
+  setStatus('loading', 'Uploading & parsing dataset…');
+  document.getElementById('runBtn').disabled = true;
+  const fd = new FormData(); fd.append('file', file);
+  try {
+    const res  = await fetch(`${API}/api/upload`, { method:'POST', body:fd });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || 'Upload failed');
+    rawRecords = data.records;
+
+    // Populate date selector
+    const ds = document.getElementById('dateSelect');
+    ds.innerHTML = '<option value="all">— All Dates (full dataset) —</option>';
+    data.dates.forEach(d => {
+      const o = document.createElement('option');
+      o.value = d; o.textContent = d; ds.appendChild(o);
+    });
+
+    setStatus('active', `Loaded ${data.total_intervals.toLocaleString()} intervals · Peak: ${data.peak_kva} kVA`);
+    document.getElementById('runBtn').disabled = false;
+    drawInputChart();
+
+    // Solar detection notice
+    if (data.solar && data.solar.has_solar) {
+      document.getElementById('pred-kwp').value = data.solar.capacity_kwp || 0;
+      showAlert('pred-alert', `☀️ Solar detected — estimated ${data.solar.capacity_kwp} kWp. Solar capacity pre-filled in Predictor.`, 'info');
+    }
+
+    // Populate tariff selector
+    if (data.tariff_meta) populateTariffSelect(data.tariff_meta, data.tariff);
+
+    // Auto-detect badge
+    if (data.tariff) {
+      document.getElementById('calc-detect').style.display = 'block';
+      document.getElementById('calc-detect').innerHTML =
+        `<div class="detect-badge">Auto-detected tariff: <strong>${data.tariff}</strong> — ${(data.tariff_meta||{})[data.tariff]?.name||''}</div>`;
+    }
+
+    toast('File loaded', 'ok');
+    pollStatus();
+  } catch(e) {
+    setStatus('error', 'Upload error: ' + e.message);
+    toast('Upload failed', 'err');
+  }
+}
+
+/* ── Date filter ───────────────────────────────────────────────────────── */
+document.getElementById('dateSelect').addEventListener('change', () => {
+  drawInputChart();
+  if (optResults.length) { drawOutputChart(); drawBatteryChart(); }
+  renderActionLog();
+});
+const filterRaw = () => {
+  const d = document.getElementById('dateSelect').value;
+  return d === 'all' ? rawRecords : rawRecords.filter(r => r.timestamp.startsWith(d));
+};
+const filterOpt = () => {
+  const d = document.getElementById('dateSelect').value;
+  return d === 'all' ? optResults : optResults.filter(r => r.timestamp.startsWith(d));
+};
+
+/* ── MD hours label ────────────────────────────────────────────────────── */
+function updateMdLabel() {
+  const s = +document.getElementById('mdStart').value;
+  const e = +document.getElementById('mdEnd').value;
+  document.getElementById('mdBadgeLabel').textContent =
+    `${String(s).padStart(2,'0')}:00–${String(e).padStart(2,'0')}:00`;
+}
+document.getElementById('mdStart').addEventListener('input', updateMdLabel);
+document.getElementById('mdEnd').addEventListener('input', updateMdLabel);
+
+/* ── Input chart ───────────────────────────────────────────────────────── */
+function drawInputChart() {
+  const data = filterRaw();
+  document.getElementById('inputEmpty').style.display = data.length ? 'none' : 'flex';
+  if (!data.length) return;
+  const mdS = +document.getElementById('mdStart').value;
+  const mdE = +document.getElementById('mdEnd').value;
+  const mdBandIdxs = data.map((r,i) => {
+    const h = new Date(r.timestamp).getHours();
+    return (h >= mdS && h < mdE) ? i : -1;
+  }).filter(i => i >= 0);
+  if (inputChartInst) inputChartInst.destroy();
+  inputChartInst = new Chart(document.getElementById('inputChart'), {
+    type: 'line',
+    data: { labels: data.map(r => fmtTime(r.timestamp)), datasets: [
+      { label:'kVA', data: data.map(r => r.kva),
+        borderColor:'#94a3b8', backgroundColor:'rgba(148,163,184,.07)',
+        borderWidth:1.5, pointRadius:0, fill:true, tension:.3 },
+      { label:'kW net', data: data.map(r => r.kw_net),
+        borderColor:'rgba(0,180,216,.5)', borderWidth:1, pointRadius:0,
+        fill:false, tension:.3, borderDash:[5,4] }
+    ]},
+    options: stdOptions('kVA / kW', false, mdBandIdxs)
+  });
+}
+
+/* ── Run optimisation ──────────────────────────────────────────────────── */
+document.getElementById('runBtn').addEventListener('click', runOpt);
+
+async function runOpt() {
+  if (!rawRecords.length) return;
+  const total = loadTypes.reduce((s,l) => s + (+l.proportion||0), 0);
+  if (Math.abs(total - 100) > 0.5) { setStatus('error', 'Load proportions must total 100%'); return; }
+  setStatus('loading', 'Running AI Manager — interval-by-interval optimisation…');
+  document.getElementById('runBtn').disabled = true;
+  document.getElementById('spinner').style.display = 'block';
+  const payload = {
+    records:              rawRecords,
+    loads:                getLoadsPayload(),
+    priority_order:       getPriorityPayload(),
+    battery_capacity_kwh: +document.getElementById('batterySize').value || 200,
+    peak_target_pct:      (+document.getElementById('peakTarget').value || 85) / 100,
+    bat_charge_upper_pct: (+document.getElementById('chargeUpper').value || 70) / 100,
+    initial_soc_pct:      (+document.getElementById('initialSoc').value || 50) / 100,
+    peak_reference_kva:   document.getElementById('peakRefKva').value.trim() !== ''
+                            ? +document.getElementById('peakRefKva').value : null,
+    lookahead_intervals:  +document.getElementById('lookahead').value || 16,
+    c_rate:               +document.getElementById('cRate').value || 0.5,
+    md_start_hour:        +document.getElementById('mdStart').value || 14,
+    md_end_hour:          +document.getElementById('mdEnd').value   || 22,
+    bat_efficiency:       (+document.getElementById('batEfficiency').value || 95) / 100,
+    pre_md_hours:         +document.getElementById('preMdHours').value || 2,
+  };
+  try {
+    const res  = await fetch(`${API}/api/optimize`,
+      { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error);
+    optResults  = data.results;
+    lastLoadKeys = data.load_keys || [];
+    allActions = [];
+    optResults.forEach(r => r.actions.forEach(a =>
+      allActions.push({ ...a, timestamp:r.timestamp, kva_original:r.kva_original, kva_managed:r.kva_managed })
+    ));
+    updateKPIs(data.summary);
+    drawOutputChart();
+    drawBatteryChart();
+    renderActionLog();
+    updateBatteryDetails(data.summary);
+    renderCurtailmentTable(data.day_summaries, data.load_keys, data.loads);
+    document.getElementById('kpiRow').style.display      = 'grid';
+    document.getElementById('outLegend').style.display   = 'flex';
+    document.getElementById('actionPanel').style.display = 'block';
+    document.getElementById('curtailPanel').style.display= 'block';
+    setStatus('active',
+      `Done · Peak ↓ ${data.summary.peak_reduction_pct}% · Discharged ${data.summary.total_battery_discharge_kwh} kWh`);
+    toast('Manager optimisation complete', 'ok');
+    pollStatus();
+  } catch(e) {
+    setStatus('error', 'Error: ' + e.message);
+    toast('Manager failed', 'err');
+  } finally {
+    document.getElementById('runBtn').disabled = false;
+    document.getElementById('spinner').style.display = 'none';
+  }
+}
+
+/* ── KPI + battery details ─────────────────────────────────────────────── */
+function updateKPIs(s) {
+  document.getElementById('kpiOrig').textContent    = s.original_peak_kva;
+  document.getElementById('kpiManaged').textContent = s.managed_peak_kva;
+  document.getElementById('kpiRed').textContent     = s.peak_reduction_pct;
+  document.getElementById('kpiBatDis').textContent  = s.total_battery_discharge_kwh;
+  document.getElementById('kpiMdRed').textContent   = s.md_peak_reduction_pct ?? '—';
+  if (s.managed_md_peak_kva != null)
+    document.getElementById('kpiMdSub').textContent =
+      `${s.original_md_peak_kva} → ${s.managed_md_peak_kva} kVA`;
+}
+function updateBatteryDetails(s) {
+  document.getElementById('bdcChg').textContent   = s.total_battery_charge_kwh;
+  document.getElementById('bdcDis').textContent   = s.total_battery_discharge_kwh;
+  const emergCount = allActions.filter(a => a.type==='battery_charge' && a.charge_trigger==='emergency').length;
+  document.getElementById('bdcEmerg').textContent = emergCount;
+  if (optResults.length) {
+    const last = filterOpt();
+    if (last.length) {
+      const pct = last[last.length-1].battery_soc_pct;
+      document.getElementById('socFill').style.width      = pct + '%';
+      document.getElementById('socFill').style.background =
+        pct < 20 ? 'var(--red)' : pct > 85 ? 'var(--green)' : 'var(--amber)';
+      document.getElementById('socPct').textContent = pct + '%';
+    }
+  }
+  document.getElementById('socGaugeRow').style.display = 'flex';
+  document.getElementById('batDetailRow').style.display = 'grid';
+}
+
+/* ── Output chart ──────────────────────────────────────────────────────── */
+function hexToRgba(hex, a) {
+  const r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);
+  return `rgba(${r},${g},${b},${a})`;
+}
+function drawOutputChart() {
+  const data = filterOpt();
+  document.getElementById('outputEmpty').style.display = data.length ? 'none' : 'flex';
+  if (!data.length) return;
+  const mdBandIdxsOut = data.map((r,i) => r.in_md_hours ? i : -1).filter(i => i >= 0);
+  const labels = data.map(r => fmtTime(r.timestamp));
+  const loadDatasets = loadTypes.map(lt => ({
+    type:'bar', label:lt.name,
+    data: data.map(r => r[`${lt.key}_managed`] ?? 0),
+    backgroundColor: hexToRgba(lt.color, 0.72),
+    stack:'m', yAxisID:'y', order:2
+  }));
+  if (outputChartInst) outputChartInst.destroy();
+  outputChartInst = new Chart(document.getElementById('outputChart'), {
+    data: {
+      labels,
+      datasets: [
+        ...loadDatasets,
+        { type:'bar', label:'Bat Charge (grid)',
+          data: data.map(r => r.battery_charge_kw),
+          backgroundColor:'rgba(34,197,94,.45)', stack:'m', yAxisID:'y', order:2 },
+        { type:'bar', label:'Bat Discharge offset',
+          data: data.map(r => -r.battery_discharge_kw),
+          backgroundColor:'rgba(249,115,22,.55)', stack:'m', yAxisID:'y', order:2 },
+        { type:'line', label:'Original kVA',
+          data: data.map(r => r.kva_original),
+          borderColor:'#94a3b8', borderWidth:1.5, pointRadius:0,
+          fill:false, tension:.3, borderDash:[6,3], yAxisID:'y', order:1 },
+        { type:'line', label:'Managed kVA',
+          data: data.map(r => r.kva_managed),
+          borderColor:'#22c55e', borderWidth:2.5, pointRadius:0,
+          fill:false, tension:.3, yAxisID:'y', order:1 },
+        { type:'line', label:'Target Peak',
+          data: data.map(r => r.target_peak),
+          borderColor:'#ef4444', borderWidth:1.2, borderDash:[8,4],
+          pointRadius:0, fill:false, yAxisID:'y', order:1 },
+        { type:'line', label:'Charge Upper',
+          data: data.map(r => r.charge_threshold_upper),
+          borderColor:'rgba(34,197,94,.5)', borderWidth:1, borderDash:[3,5],
+          pointRadius:0, fill:false, yAxisID:'y', order:1 },
+      ]
+    },
+    options: stdOptions('kVA', true, mdBandIdxsOut)
+  });
+}
+
+/* ── Battery chart ─────────────────────────────────────────────────────── */
+function drawBatteryChart() {
+  const data = filterOpt();
+  document.getElementById('batEmpty').style.display = data.length ? 'none' : 'flex';
+  if (!data.length) return;
+  const mdBandIdxsBat = data.map((r,i) => r.in_md_hours ? i : -1).filter(i => i >= 0);
+  const chgNormal = data.map(r =>
+    r.actions.find(x => x.type==='battery_charge' && x.charge_trigger==='normal')
+      ? r.battery_charge_kw : 0);
+  const chgEmerg = data.map(r =>
+    r.actions.find(x => x.type==='battery_charge' && x.charge_trigger==='emergency')
+      ? r.battery_charge_kw : 0);
+  if (batChartInst) batChartInst.destroy();
+  batChartInst = new Chart(document.getElementById('batteryChart'), {
+    data: { labels: data.map(r => fmtTime(r.timestamp)), datasets: [
+      { type:'bar', label:'Normal Charge (kW)',    data: chgNormal,
+        backgroundColor:'rgba(34,197,94,.65)',  yAxisID:'y2', stack:'bat', order:2 },
+      { type:'bar', label:'Emergency Charge (kW)', data: chgEmerg,
+        backgroundColor:'rgba(239,68,68,.70)',  yAxisID:'y2', stack:'bat', order:2 },
+      { type:'bar', label:'Discharge (kW)',        data: data.map(r => r.battery_discharge_kw),
+        backgroundColor:'rgba(249,115,22,.65)', yAxisID:'y2', stack:'bat', order:2 },
+      { type:'line', label:'SOC (kWh)', data: data.map(r => r.battery_soc_kwh),
+        borderColor:'#22c55e', backgroundColor:'rgba(34,197,94,.08)',
+        borderWidth:2.5, pointRadius:0, fill:true, tension:.4, yAxisID:'y', order:1 },
+    ]},
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      interaction:{ mode:'index', intersect:false },
+      plugins:{ legend:{ display:false }, tooltip: tooltipStyle(), mdBand:{ indices: mdBandIdxsBat } },
+      scales:{
+        x:{ grid:{ color:'rgba(31,47,74,.5)' }, ticks:{ maxTicksLimit:14 } },
+        y:{  position:'left',  grid:{ color:'rgba(31,47,74,.5)' },
+             title:{ display:true, text:'SOC (kWh)', color:'#6b7a9a',
+               font:{ family:"'Times New Roman',Times,serif" } } },
+        y2:{ position:'right', grid:{ drawOnChartArea:false }, stacked:true,
+             title:{ display:true, text:'Power (kW)', color:'#6b7a9a',
+               font:{ family:"'Times New Roman',Times,serif" } } }
+      }
+    }
+  });
+}
+
+/* ── Action log ────────────────────────────────────────────────────────── */
+document.querySelectorAll('.filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    activeFilter = btn.dataset.filter;
+    renderActionLog();
+  });
+});
+function renderActionLog() {
+  const d = document.getElementById('dateSelect').value;
+  let acts = allActions;
+  if (d !== 'all') acts = acts.filter(a => a.timestamp.startsWith(d));
+  if (activeFilter !== 'all') acts = acts.filter(a => a.type === activeFilter);
+  const tbody = document.getElementById('actionTbody');
+  const noMsg = document.getElementById('noActions');
+  tbody.innerHTML = '';
+  if (!acts.length) { noMsg.style.display='block'; return; }
+  noMsg.style.display = 'none';
+  acts.forEach(a => {
+    const tr = document.createElement('tr');
+    let badge, deltaCell, socCell, detailCell;
+    if (a.type === 'load_reduction') {
+      badge      = `<span class="type-badge tb-lr">Load Cut</span>`;
+      deltaCell  = `<span style="color:var(--red)">−${a.cut_kva} kVA</span>`;
+      socCell    = `<span style="color:var(--muted)">—</span>`;
+      detailCell = `Max ${a.max_cut_pct}% · Running ${a.factor_pct}%`;
+    } else if (a.type === 'battery_discharge') {
+      const laTag = a.lookahead_triggered
+        ? `<span style="font-size:9px;background:rgba(0,180,216,.18);color:#00b4d8;border:1px solid rgba(0,180,216,.4);border-radius:3px;padding:1px 5px;margin-left:4px">look-ahead</span>` : '';
+      const mdTag = a.md_hours
+        ? `<span style="font-size:9px;background:rgba(239,68,68,.18);color:var(--red);border:1px solid rgba(239,68,68,.4);border-radius:3px;padding:1px 5px;margin-left:4px">MD hrs</span>` : '';
+      badge      = `<span class="type-badge tb-dis">Discharge</span>${laTag}${mdTag}`;
+      deltaCell  = `<span style="color:var(--dis)">−${a.discharge_kw} kW</span>`;
+      socCell    = `${a.soc_before_kwh} → <strong>${a.soc_after_kwh}</strong> kWh`;
+      detailCell = `kVA: ${a.kva_before} → ${a.kva_after}`;
+    } else {
+      const isEmerg = a.charge_trigger === 'emergency';
+      badge      = isEmerg ? `<span class="type-badge tb-chg-em">Emergency Chg</span>`
+                           : `<span class="type-badge tb-chg">Normal Chg</span>`;
+      deltaCell  = `<span style="color:var(--chg)">+${a.charge_kw} kW</span>`;
+      socCell    = `${a.soc_before_kwh} → <strong>${a.soc_after_kwh}</strong> kWh`;
+      detailCell = isEmerg
+        ? `SOC < 15% · ceiling ${a.kva_ceiling ? a.kva_ceiling + ' kVA' : '100% target'}`
+        : `Off-peak charge · ceiling ${a.kva_ceiling ? a.kva_ceiling + ' kVA' : '92% target'}`;
+    }
+    tr.innerHTML = `
+      <td>${fmtTime(a.timestamp)}</td><td>${badge}</td>
+      <td style="font-weight:700">${a.load}</td>
+      <td style="color:var(--muted)">${a.kva_original} kVA</td>
+      <td>${deltaCell}</td>
+      <td style="color:var(--green)">${a.kva_managed} kVA</td>
+      <td style="font-size:11px">${socCell}</td>
+      <td style="color:var(--muted);font-size:11px;font-style:italic">${detailCell}</td>
+      <td style="color:var(--muted);font-size:11px;font-style:italic">${a.note||''}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+/* ── Curtailment table ─────────────────────────────────────────────────── */
+function renderCurtailmentTable(daySummaries, loadKeys, loadsInfo) {
+  const thead = document.getElementById('curtailHead');
+  const tbody = document.getElementById('curtailTbody');
+  const headerCols = loadKeys.map(k =>
+    `<th style="color:${loadsInfo[k]?.color||'var(--text)'}">${loadsInfo[k]?.name||k} kVAh</th>`
+  ).join('');
+  thead.innerHTML = `<tr><th>Date</th>${headerCols}<th>Total kVAh Cut</th>
+    <th style="color:var(--dis)">Discharge kWh</th><th style="color:var(--chg)">Charge kWh</th>
+    <th>Orig Peak</th><th>Mgd Peak</th><th>Reduction</th></tr>`;
+  tbody.innerHTML = '';
+  const days = Object.keys(daySummaries).sort();
+  const totals = {}; loadKeys.forEach(k => totals[k] = 0);
+  let totDis = 0, totChg = 0;
+  days.forEach(date => {
+    const s = daySummaries[date]; let rowTot = 0;
+    const loadCells = loadKeys.map(k => {
+      const v = s[`${k}_total_kvah_cut`] || 0; totals[k] += v; rowTot += v;
+      return `<td style="color:${loadsInfo[k]?.color||'var(--text)'}">${v.toFixed(2)}</td>`;
+    }).join('');
+    totDis += s.total_discharge_kwh || 0; totChg += s.total_charge_kwh || 0;
+    const red = s.orig_peak > 0
+      ? ((s.orig_peak - s.managed_peak) / s.orig_peak * 100).toFixed(1) + '%' : '—';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td style="font-weight:700">${date}</td>${loadCells}
+      <td style="font-weight:700">${rowTot.toFixed(2)}</td>
+      <td style="color:var(--dis)">${(s.total_discharge_kwh||0).toFixed(2)}</td>
+      <td style="color:var(--chg)">${(s.total_charge_kwh||0).toFixed(2)}</td>
+      <td style="color:var(--muted)">${s.orig_peak.toFixed(1)}</td>
+      <td style="color:var(--green)">${s.managed_peak.toFixed(1)}</td>
+      <td style="color:var(--amber);font-weight:700">${red}</td>`;
+    tbody.appendChild(tr);
+  });
+  const grandTot = Object.values(totals).reduce((a,b)=>a+b,0);
+  const totalCells = loadKeys.map(k =>
+    `<td style="color:${loadsInfo[k]?.color||'var(--text)'}">${totals[k].toFixed(2)}</td>`
+  ).join('');
+  const tr = document.createElement('tr');
+  tr.style.cssText = 'border-top:2px solid var(--border);font-weight:700;background:rgba(31,47,74,.4)';
+  tr.innerHTML = `<td style="font-style:italic">TOTAL (all days)</td>${totalCells}
+    <td>${grandTot.toFixed(2)}</td>
+    <td style="color:var(--dis)">${totDis.toFixed(2)}</td>
+    <td style="color:var(--chg)">${totChg.toFixed(2)}</td>
+    <td colspan="3" style="color:var(--muted);font-style:italic;font-weight:400">kVAh = kVA × 0.5 h per interval</td>`;
+  tbody.appendChild(tr);
+}
+
+/* ── Manager helpers ───────────────────────────────────────────────────── */
+function fmtTime(iso) {
+  const d = new Date(iso);
+  const sel = document.getElementById('dateSelect').value;
+  if (sel === 'all')
+    return d.toLocaleDateString('en-MY',{month:'short',day:'numeric'}) + ' ' +
+           d.toLocaleTimeString('en-MY',{hour:'2-digit',minute:'2-digit'});
+  return d.toLocaleTimeString('en-MY',{hour:'2-digit',minute:'2-digit'});
+}
+function tooltipStyle() {
+  return { backgroundColor:'#182035', titleColor:'#dde4f0', bodyColor:'#6b7a9a',
+    borderColor:'#1f2f4a', borderWidth:1, padding:10,
+    titleFont:{family:"'Times New Roman',Times,serif"},
+    bodyFont: {family:"'Times New Roman',Times,serif"} };
+}
+function stdOptions(yLabel, stacked, mdIndices=[]) {
+  return {
+    responsive:true, maintainAspectRatio:false,
+    interaction:{ mode:'index', intersect:false },
+    plugins:{ legend:{ display:false }, tooltip: tooltipStyle(), mdBand:{ indices: mdIndices } },
+    scales:{
+      x:{ grid:{color:'rgba(31,47,74,.5)'}, ticks:{maxTicksLimit:14}, stacked },
+      y:{ grid:{color:'rgba(31,47,74,.5)'}, stacked,
+          title:{display:true,text:yLabel,color:'#6b7a9a',
+            font:{family:"'Times New Roman',Times,serif"}} }
+    }
+  };
+}
+function setStatus(state, msg) {
+  document.getElementById('statusDot').className = 'sdot ' + state;
+  document.getElementById('statusMsg').textContent = msg;
+  document.getElementById('spinner').style.display = state === 'loading' ? 'block' : 'none';
+}
+
+
+/* ════════════════════════════════════════════════════════════════════════════
+   SECTION B — PREDICTOR
+   ════════════════════════════════════════════════════════════════════════════ */
+let predChartInst = null;
+
+async function trainPredictor() {
+  const btn = document.getElementById('btn-train');
+  btn.disabled = true; btn.textContent = '⏳ Training…';
+  showAlert('pred-alert', 'Training LightGBM forecaster — this may take 30–60 s…', 'info');
+  try {
+    const body = {
+      capacity_kwp:  +document.getElementById('pred-kwp').value,
+      n_estimators:  +document.getElementById('pred-rounds').value,
+      learning_rate: +document.getElementById('pred-lr').value,
+    };
+    const res  = await fetch('/api/predictor/train', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    const d = await res.json();
+    if (!d.ok) throw new Error(d.error);
+
+    showAlert('pred-alert',
+      `✅ Trained ${d.n_models} models · Mean MAPE: ${d.mean_mape}% · MAPE@24h: ${d.mape_at_h24}%`, 'ok');
+
+    document.getElementById('pred-kpis').style.display = 'block';
+    document.getElementById('kpiPredictor').innerHTML =
+      kpiCard('Models Trained', d.n_models, '', '48 direct-step LightGBM models', 'c-purple') +
+      kpiCard('Mean MAPE', d.mean_mape, '%', 'Across all 48 horizons', 'c-cyan') +
+      kpiCard('MAPE @ 24 h', d.mape_at_h24, '%', 'Final horizon accuracy', 'c-green') +
+      kpiCard('Status', '✓ Ready', '', 'Click Generate Forecast', 'c-amber');
+
+    document.getElementById('btn-forecast').disabled = false;
+    document.getElementById('btn-cv').disabled = false;
+    toast('Forecaster trained', 'ok');
+    pollStatus();
+    await runForecast();
+  } catch(e) {
+    showAlert('pred-alert', '❌ ' + e.message, 'err');
+    toast('Training failed', 'err');
+  } finally {
+    btn.disabled = false; btn.textContent = '🧠 Train Forecaster';
+  }
+}
+
+async function runForecast() {
+  const btn = document.getElementById('btn-forecast');
+  btn.disabled = true; btn.textContent = '⏳ Forecasting…';
+  try {
+    const res = await fetch('/api/predictor/forecast', {method:'POST'});
+    const d   = await res.json();
+    if (!d.ok) throw new Error(d.error);
+
+    document.getElementById('pred-chart-panel').style.display = 'block';
+    if (predChartInst) predChartInst.destroy();
+    const allLabels = [...d.chart.hist_labels, ...d.chart.fc_labels];
+    const nHist = d.chart.hist_labels.length;
+    const nFc   = d.chart.fc_labels.length;
+    predChartInst = new Chart(document.getElementById('predChart'), {
+      type:'line',
+      data:{
+        labels: allLabels,
+        datasets:[
+          { label:'Historical', pointRadius:0, borderWidth:1.5, tension:.3, fill:false,
+            borderColor:'#6b7a9a', borderDash:[4,3],
+            data:[...d.chart.hist_kw, ...new Array(nFc).fill(null)] },
+          { label:'P10–P90 Band', pointRadius:0, borderWidth:0,
+            borderColor:'rgba(0,0,0,0)', backgroundColor:'rgba(0,212,255,.12)',
+            fill:'+1',
+            data:[...new Array(nHist).fill(null), ...d.chart.fc_p90] },
+          { label:'Median Forecast', pointRadius:0, borderWidth:2, tension:.3, fill:false,
+            borderColor:'#00d4ff',
+            data:[...new Array(nHist).fill(null), ...d.chart.fc_median] },
+          { label:'P10', pointRadius:0, borderWidth:0,
+            borderColor:'rgba(0,0,0,0)', backgroundColor:'rgba(0,212,255,.12)',
+            fill:false,
+            data:[...new Array(nHist).fill(null), ...d.chart.fc_p10] },
+        ]
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        interaction:{mode:'index',intersect:false},
+        plugins:{ legend:{display:false}, tooltip:tooltipStyle() },
+        scales:{
+          x:{ grid:{color:'rgba(31,47,74,.5)'}, ticks:{maxTicksLimit:12} },
+          y:{ grid:{color:'rgba(31,47,74,.5)'},
+              title:{display:true,text:'kW',color:'#6b7a9a',font:{family:"'Times New Roman',Times,serif"}} }
+        }
+      }
+    });
+
+    // Peaks table
+    if (d.peaks && d.peaks.length) {
+      document.getElementById('peaks-panel').style.display = 'block';
+      const cols = Object.keys(d.peaks[0]);
+      let html = '<thead><tr>' + cols.map(c=>`<th>${c.replace(/_/g,' ')}</th>`).join('') + '</tr></thead><tbody>';
+      d.peaks.forEach(r => {
+        html += '<tr>' + cols.map(c => `<td>${typeof r[c]==='number'?r[c].toFixed(1):r[c]}</td>`).join('') + '</tr>';
+      });
+      html += '</tbody>';
+      document.getElementById('peaksTable').innerHTML = html;
+    }
+    toast('Forecast ready', 'ok');
+    pollStatus();
+  } catch(e) {
+    showAlert('pred-alert', '❌ Forecast failed: ' + e.message, 'err');
+    toast('Forecast failed', 'err');
+  } finally {
+    btn.disabled = false; btn.textContent = '📈 Generate 24h Forecast';
+  }
+}
+
+async function runCV() {
+  const btn = document.getElementById('btn-cv');
+  btn.disabled = true; btn.textContent = '⏳ Running CV…';
+  showAlert('pred-alert','Running cross-validation — 4 expanding-window folds…','info');
+  try {
+    const body = {
+      capacity_kwp:  +document.getElementById('pred-kwp').value,
+      n_estimators:  +document.getElementById('pred-rounds').value,
+      learning_rate: +document.getElementById('pred-lr').value,
+    };
+    const res = await fetch('/api/predictor/train', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    const d = await res.json();
+    if (!d.ok) throw new Error(d.error);
+    document.getElementById('cv-panel').style.display = 'block';
+    document.getElementById('cv-text').textContent =
+      `Models trained : ${d.n_models}\nMean MAPE      : ${d.mean_mape}%\nMAPE @ 24 h    : ${d.mape_at_h24}%\n\nNote: full expanding-window CV runs on server; results above reflect the final trained model metrics.`;
+    showAlert('pred-alert','✅ Cross-validation complete.','ok');
+  } catch(e) {
+    showAlert('pred-alert','❌ CV failed: '+e.message,'err');
+  } finally {
+    btn.disabled = false; btn.textContent = '🔁 Cross-Validate';
+  }
+}
+
+
+/* ════════════════════════════════════════════════════════════════════════════
+   SECTION C — BILL CALCULATOR
+   ════════════════════════════════════════════════════════════════════════════ */
+let calcChartInst = null;
+
+function populateTariffSelect(tariffMeta, selected) {
+  const sel = document.getElementById('calc-tariff');
+  sel.innerHTML = Object.entries(tariffMeta)
+    .map(([k,v]) => `<option value="${k}" ${k===selected?'selected':''}>${k} — ${v.name}</option>`)
+    .join('');
+}
+
+async function runCalculator() {
+  const btn = document.getElementById('btn-calc');
+  btn.disabled = true; btn.textContent = '⏳ Calculating…';
+  showAlert('calc-alert','Computing TNB bills…','info');
+  try {
+    const body = {
+      tariff:   document.getElementById('calc-tariff').value,
+      icpt_sen: +document.getElementById('calc-icpt').value,
+      nem_rate: +document.getElementById('calc-nem').value,
+    };
+    const res = await fetch('/api/calculator/bill', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    const d = await res.json();
+    if (!d.ok) throw new Error(d.error);
+
+    const t = d.totals;
+    showAlert('calc-alert',
+      `✅ Bills calculated · Tariff ${d.tariff} — ${d.tariff_name}`, 'ok');
+
+    // Bill summary cards
+    document.getElementById('calc-cards').style.display = 'block';
+    if (d.show_comparison) {
+      document.getElementById('billCards').innerHTML = `
+        <div class="bill-card bill-card-gross">
+          <div class="bill-sub">Total Bill — Before Optimisation</div>
+          <div class="bill-total">RM ${t.before_rm.toLocaleString('en-MY',{minimumFractionDigits:0,maximumFractionDigits:0})}</div>
+          <div class="tariff-pill">⚡ ${d.tariff} · ${d.tariff_name}</div>
+        </div>
+        <div class="bill-card bill-card-net">
+          <div class="bill-sub">Total Bill — After Optimisation</div>
+          <div class="bill-total">RM ${t.after_rm.toLocaleString('en-MY',{minimumFractionDigits:0,maximumFractionDigits:0})}</div>
+          <div class="tariff-pill">✅ Saving RM ${t.savings_rm.toLocaleString('en-MY',{minimumFractionDigits:0,maximumFractionDigits:0})}</div>
+        </div>
+        <div class="bill-card bill-card-save">
+          <div class="bill-sub">Projected Annual Savings</div>
+          <div class="bill-total">RM ${t.ann_savings_rm.toLocaleString('en-MY',{minimumFractionDigits:0,maximumFractionDigits:0})}</div>
+          <div class="tariff-pill">📅 Annualised from ${d.rows_opt.length} months</div>
+        </div>`;
+
+      // Comparison chart
+      document.getElementById('calc-chart-panel').style.display = 'block';
+      if (calcChartInst) calcChartInst.destroy();
+      calcChartInst = new Chart(document.getElementById('calcChart'), {
+        type:'bar',
+        data:{
+          labels: d.rows_opt.map(r=>r.month),
+          datasets:[
+            {label:'Before', data:d.rows_orig.map(r=>r.net_bill_rm),
+              backgroundColor:'rgba(239,68,68,.7)', borderColor:'#ef4444', borderWidth:1},
+            {label:'After',  data:d.rows_opt.map(r=>r.net_bill_rm),
+              backgroundColor:'rgba(34,197,94,.7)', borderColor:'#22c55e', borderWidth:1},
+          ]
+        },
+        options:{
+          responsive:true, maintainAspectRatio:false,
+          interaction:{mode:'index',intersect:false},
+          plugins:{legend:{labels:{color:'#dde4f0',font:{family:"'Times New Roman',Times,serif"}}},tooltip:tooltipStyle()},
+          scales:{
+            x:{grid:{color:'rgba(31,47,74,.5)'},ticks:{color:'#6b7a9a'}},
+            y:{grid:{color:'rgba(31,47,74,.5)'},ticks:{color:'#6b7a9a'},
+               title:{display:true,text:'RM',color:'#6b7a9a',font:{family:"'Times New Roman',Times,serif"}}}
+          }
+        }
+      });
+    } else {
+      document.getElementById('billCards').innerHTML = `
+        <div class="bill-card bill-card-gross">
+          <div class="bill-sub">Total Bill (period)</div>
+          <div class="bill-total">RM ${t.after_rm.toLocaleString('en-MY',{minimumFractionDigits:0,maximumFractionDigits:0})}</div>
+          <div class="tariff-pill">⚡ ${d.tariff} · ${d.tariff_name}</div>
+        </div>
+        <div class="bill-card bill-card-net">
+          <div class="bill-sub">Average Monthly</div>
+          <div class="bill-total">RM ${Math.round(t.after_rm/Math.max(d.rows_opt.length,1)).toLocaleString('en-MY')}</div>
+          <div class="tariff-pill">📅 ${d.rows_opt.length} months</div>
+        </div>`;
+    }
+
+    // Monthly breakdown table
+    document.getElementById('calc-table-panel').style.display = 'block';
+    const headers = ['Month','Total kWh','Peak kWh','MD kW','Energy RM','MD RM','ICPT RM','KWTBB RM','Svc Tax RM','NEM Credit RM','Net Bill RM'];
+    const fields  = ['month','total_kwh','peak_kwh','max_demand_kw','energy_rm','md_rm','icpt_rm','kwtbb_rm','svc_tax_rm','nem_credit_rm','net_bill_rm'];
+    let html = '<thead><tr>'+headers.map(h=>`<th>${h}</th>`).join('')+'</tr></thead><tbody>';
+    d.rows_opt.forEach(r => {
+      html += '<tr>' + fields.map(f => {
+        const v = r[f];
+        return `<td>${typeof v==='number'?v.toLocaleString('en-MY',{minimumFractionDigits:typeof v==='number'&&v!==Math.round(v)?2:0}):v}</td>`;
+      }).join('') + '</tr>';
+    });
+    html += '</tbody>';
+    document.getElementById('billTable').innerHTML = html;
+
+    toast('Bills calculated','ok');
+    pollStatus();
+  } catch(e) {
+    showAlert('calc-alert','❌ '+e.message,'err');
+    toast('Calculation failed','err');
+  } finally {
+    btn.disabled = false; btn.textContent = '💰 Calculate Bills';
+  }
+}
+
+
+/* ════════════════════════════════════════════════════════════════════════════
+   SECTION D — POWERRECO
+   ════════════════════════════════════════════════════════════════════════════ */
+let solarChartInst = null, npvChartInst = null;
+
+// Update self-consumption label
+document.getElementById('pr-sc').addEventListener('input', function() {
+  document.getElementById('lbl-sc').textContent = this.value;
+  document.getElementById('sc-val-display').textContent = this.value + '%';
+});
+
+async function runPowerRECO() {
+  const btn = document.getElementById('btn-pr');
+  btn.disabled = true; btn.textContent = '⏳ Analysing…';
+  showAlert('pr-alert','Sizing solar & battery, computing 25-year ROI…','info');
+  try {
+    const body = {
+      roof_area:        +document.getElementById('pr-roof').value,
+      panel_w:          +document.getElementById('pr-panel').value,
+      psh:              +document.getElementById('pr-psh').value,
+      solar_cost:       +document.getElementById('pr-scost').value,
+      batt_cost:        +document.getElementById('pr-bcost').value,
+      self_cons:         document.getElementById('pr-sc').value / 100,
+      use_new_tariff:    document.getElementById('pr-newmd').checked,
+      manual_daily_kwh: +document.getElementById('pr-manual-kwh').value,
+      manual_md_kw:     +document.getElementById('pr-manual-md').value,
+    };
+    const res = await fetch('/api/powerreco/run', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    const d = await res.json();
+    if (!d.ok) throw new Error(d.error);
+    roiData = d;
+
+    const s = d.solar, b = d.battery, r = d.roi;
+    showAlert('pr-alert','✅ PowerRECO analysis complete.','ok');
+
+    // Solar KPIs
+    document.getElementById('pr-solar').style.display = 'block';
+    document.getElementById('kpiSolar').innerHTML =
+      kpiCard('System Size',    s.system_kwp,               ' kWp', `${s.n_panels} × ${s.panel_wattage_w}W panels`, 'c-amber') +
+      kpiCard('Annual Output',  s.annual_generation_kwh.toLocaleString('en-MY'), ' kWh', 'Seasonal estimate', 'c-green') +
+      kpiCard('Usable Roof',    s.usable_area_m2,            ' m²',  '75% of input area', 'c-cyan') +
+      kpiCard('Daily Average',  s.daily_generation_kwh_avg,  ' kWh', `At ${body.psh} h sun/day`, 'c-purple');
+
+    if (solarChartInst) solarChartInst.destroy();
+    solarChartInst = new Chart(document.getElementById('solarChart'), {
+      type:'bar',
+      data:{
+        labels: s.month_labels,
+        datasets:[{label:'Monthly Generation kWh', data:s.monthly_breakdown_kwh,
+          backgroundColor:'rgba(245,158,11,.7)', borderColor:'#f59e0b', borderWidth:1}]
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        plugins:{legend:{display:false}, tooltip:tooltipStyle()},
+        scales:{
+          x:{grid:{color:'rgba(31,47,74,.5)'},ticks:{color:'#6b7a9a'}},
+          y:{grid:{color:'rgba(31,47,74,.5)'},ticks:{color:'#6b7a9a'},
+             title:{display:true,text:'kWh',color:'#6b7a9a',font:{family:"'Times New Roman',Times,serif"}}}
+        }
+      }
+    });
+
+    // Battery KPIs
+    document.getElementById('pr-battery').style.display = 'block';
+    document.getElementById('kpiBattery').innerHTML =
+      kpiCard('Recommended Capacity', b.min_kwh_commercial, ' kWh', 'Commercial sizing','c-cyan') +
+      kpiCard('MD Reduction',         b.md_reduction_kw,    ' kW',  'Peak demand shaved','c-green') +
+      kpiCard('Days Analysed',        b.n_days_analyzed,    '',     'From Manager results','c-purple');
+    const battCls = b.n_days_analyzed === 0 ? 'warn-box' : 'good-box';
+    document.getElementById('batt-note').innerHTML =
+      `<div class="${battCls}">${b.spike_note || 'Battery sized from Manager peak-discharge analysis.'}</div>`;
+
+    // ROI KPIs
+    document.getElementById('pr-roi').style.display = 'block';
+    const pbCls  = r.simple_payback_years < 8  ? 'c-green' : r.simple_payback_years < 12 ? 'c-amber' : 'c-red';
+    const npvCls = r.npv_25yr_rm >= 0 ? 'c-green' : 'c-red';
+    const irr    = r.irr_pct != null ? r.irr_pct + '%' : 'N/A';
+    document.getElementById('kpiROI').innerHTML =
+      kpiCard('Total CAPEX',    'RM ' + r.total_capex_rm.toLocaleString('en-MY'),       '', 'Solar + battery investment', 'c-red') +
+      kpiCard('Simple Payback', r.simple_payback_years, ' yrs', 'Undiscounted',          pbCls) +
+      kpiCard('NPV (25 yr)',    'RM ' + r.npv_25yr_rm.toLocaleString('en-MY'),           '', 'Net present value',         npvCls) +
+      kpiCard('IRR',            irr, '', 'Internal rate of return',                       'c-purple');
+    document.getElementById('kpiROI2').innerHTML =
+      kpiCard('Annual Energy Savings', 'RM '+r.annual_energy_savings_rm.toLocaleString('en-MY'), '', 'kWh bill reduction','c-green') +
+      kpiCard('Annual MD Savings',     'RM '+r.annual_md_savings_rm.toLocaleString('en-MY'),     '', 'Peak demand charge', 'c-amber') +
+      kpiCard('Annual NEM Credit',     'RM '+r.annual_nem_credit_rm.toLocaleString('en-MY'),     '', 'Solar export buyback','c-cyan');
+
+    // Cumulative NPV chart
+    const years = Array.from({length:r.cumulative_npv.length},(_,i)=>i+1);
+    if (npvChartInst) npvChartInst.destroy();
+    npvChartInst = new Chart(document.getElementById('npvChart'), {
+      type:'line',
+      data:{
+        labels: years,
+        datasets:[{
+          label:'Cumulative NPV (RM)', data:r.cumulative_npv,
+          borderColor:'#22c55e', borderWidth:2, pointRadius:3,
+          fill:'origin', backgroundColor:'rgba(34,197,94,.09)',
+          pointBackgroundColor:'#22c55e',
+        }]
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        interaction:{mode:'index',intersect:false},
+        plugins:{
+          legend:{labels:{color:'#dde4f0',font:{family:"'Times New Roman',Times,serif"}}},
+          tooltip:tooltipStyle()
+        },
+        scales:{
+          x:{grid:{color:'rgba(31,47,74,.5)'},ticks:{color:'#6b7a9a'},
+             title:{display:true,text:'Year',color:'#6b7a9a',font:{family:"'Times New Roman',Times,serif"}}},
+          y:{grid:{color:'rgba(31,47,74,.5)'},ticks:{color:'#6b7a9a'},
+             title:{display:true,text:'RM',color:'#6b7a9a',font:{family:"'Times New Roman',Times,serif"}}}
+        }
+      }
+    });
+    // Zero line
+    npvChartInst.options.plugins.annotation = {
+      annotations:{zero:{type:'line',yMin:0,yMax:0,borderColor:'rgba(107,122,154,.6)',borderWidth:1,borderDash:[4,3]}}
+    };
+
+    // Verdict
+    const verdictOk = r.npv_25yr_rm >= 0 && r.simple_payback_years < 10;
+    document.getElementById('pr-verdict').innerHTML =
+      `<div class="${verdictOk?'good-box':'warn-box'}">
+        <strong>System Verdict</strong> — CO₂ offset <strong style="color:#22c55e">${r.co2_offset_tonnes_yr} t/year</strong> ·
+        Self-consumption <strong>${(body.self_cons*100).toFixed(0)}%</strong> ·
+        MD rate <strong>RM ${r.md_rate_used}/kW/month</strong><br>
+        ${verdictOk
+          ? '✅ Positive NPV — investment is recommended at the given cost parameters.'
+          : '⚠️ NPV is marginal or negative — review system sizing, costs, or tariff inputs.'}
+      </div>`;
+
+    toast('PowerRECO complete','ok');
+    pollStatus();
+  } catch(e) {
+    showAlert('pr-alert','❌ '+e.message,'err');
+    toast('PowerRECO failed','err');
+  } finally {
+    btn.disabled = false; btn.textContent = '🌞 Run PowerRECO Analysis';
+  }
+}
+
+function downloadROI(e) {
+  e.preventDefault();
+  if (!roiData) { toast('Run PowerRECO first','err'); return; }
+  const blob = new Blob([JSON.stringify(roiData, null, 2)], {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'bolt_roi_summary.json';
+  a.click();
+}
+
+
+/* ════════════════════════════════════════════════════════════════════════════
+   SECTION E — SHARED UTILITIES  (tabs, KPI card helper, toast, status poll)
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* Tab switching */
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+  });
+});
+
+/* KPI card helper (shared across all sections) */
+function kpiCard(label, value, unit, sub, colorClass) {
+  return `<div class="kpi-card ${colorClass||'c-cyan'}">
+    <div class="kpi-label">${label}</div>
+    <div class="kpi-value">${value}<span class="kpi-unit">${unit||''}</span></div>
+    <div class="kpi-sub">${sub||''}</div>
+  </div>`;
+}
+
+/* Alert banner helper */
+function showAlert(containerId, msg, type) {
+  const map = {ok:'alert-ok', info:'alert-info', warn:'alert-warn', err:'alert-err'};
+  const el = document.getElementById(containerId);
+  if (el) el.innerHTML = `<div class="alert ${map[type]||'alert-info'}">${msg}</div>`;
+}
+
+/* Toast notification */
+function toast(msg, type='info') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.style.display = 'block';
+  el.style.borderColor = type==='ok'?'var(--green)':type==='err'?'var(--red)':'var(--accent)';
+  el.style.color = type==='ok'?'var(--green)':type==='err'?'var(--red)':'var(--accent)';
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.style.display='none', 3200);
+}
+
+/* Pipeline status polling */
+async function pollStatus() {
+  try {
+    const res = await fetch('/api/status');
+    const d   = await res.json();
+    if (!d.ok) return;
+    document.getElementById('serverDot').classList.add('on');
+    const map = {data:'pl-data', predictor:'pl-predictor', forecast:'pl-forecast',
+                 manager:'pl-manager', calculator:'pl-calculator', powerreco:'pl-powerreco'};
+    for (const [key, id] of Object.entries(map)) {
+      const dot = document.getElementById(id);
+      if (dot) dot.classList.toggle('done', !!d.stages[key]);
+    }
+    // Populate tariff selector if not yet populated
+    if (d.tariff_meta && document.getElementById('calc-tariff').options.length <= 1) {
+      populateTariffSelect(d.tariff_meta, d.tariff_code);
+    }
+  } catch {
+    document.getElementById('serverDot').classList.remove('on');
+  }
+}
+
+/* ── Init ────────────────────────────────────────────────────────────────── */
+renderLoadCards();
+pollStatus();
+setInterval(pollStatus, 8000);
+</script>
+</body>
+</html>
