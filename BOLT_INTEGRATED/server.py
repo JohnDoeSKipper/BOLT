@@ -45,6 +45,7 @@ CORS(app)
 # ── BOLT module imports ───────────────────────────────────────────────────────
 from predictor.forecaster import DirectMultiStepForecaster
 from predictor.solar_estimator import detect_has_solar, estimate_solar_capacity_kwp
+from manager.optimizer import run_ai_manager as _mgr_run_pkg  # v7 — single source of truth
 from calculator.tnb_tariffs import (
     auto_detect_tariff, compute_monthly_stats, calculate_bill,
     compute_nem_credit, TARIFF_META,
@@ -177,115 +178,37 @@ def _mgr_run(df, loads, battery_kwh, priority_order,
              peak_target_pct, bat_charge_upper_pct,
              c_rate=0.5, initial_soc_pct=0.50, bat_efficiency=0.95,
              peak_reference_kva=None, lookahead_intervals=16,
-             md_start_hour=14, md_end_hour=22, pre_md_hours=2):
-    """Manager v6 interval-by-interval optimiser (exact replica)."""
-    INTERVAL_H=0.5; BAT_EMERG=0.15; BAT_FULL=0.90
-    BAT_DIS_MIN=0.15; PROX_N=0.80; PROX_MD=0.70
-    CHG_GUARD=0.92; EMERG_GUARD=1.00
-    load_keys=list(loads.keys())
-    tot_prop=sum(loads[k].get('proportion',0) for k in load_keys) or 1
-    norm={k:loads[k].get('proportion',0)/tot_prop for k in load_keys}
-    df=df.copy().sort_values('timestamp').reset_index(drop=True)
-    df['date']=df['timestamp'].dt.date
-    df['hour']=df['timestamp'].dt.hour
-    df['in_md']=df['hour'].apply(lambda h: md_start_hour<=h<md_end_hour)
-    pms=(md_start_hour-pre_md_hours)%24
-    df['in_pre_md']=df['hour'].apply(
-        lambda h:(pms<=h<md_start_hour) if pms<md_start_hour else (h>=pms or h<md_start_hour))
-    if peak_reference_kva is not None:
-        df['_ref']=float(peak_reference_kva)
-    else:
-        dm=df.groupby('date')['kva'].max().sort_index()
-        rr=dm.shift(1).rolling(30,min_periods=1).max().fillna(dm.iloc[0]*1.10)
-        df['_ref']=df['date'].map(rr.to_dict())
-    day_pk=df.groupby('date')['kva'].max().to_dict()
-    bmax=battery_kwh; bmin=battery_kwh*0.05; bemerg=battery_kwh*BAT_EMERG
-    bfull=battery_kwh*BAT_FULL; bdmin=battery_kwh*BAT_DIS_MIN
-    chg_rate=battery_kwh*c_rate; dis_rate=battery_kwh*c_rate
-    soc=battery_kwh*initial_soc_pct
-    results=[]; n=len(df)
-    for idx in range(n):
-        row=df.iloc[idx]; kva0=float(row['kva']); kw=float(row['kw_net'])
-        kvar=float(row['kvar_net']); date=row['date']; ts=row['timestamp']
-        ref=float(row['_ref']); in_md=bool(row['in_md']); in_pre=bool(row['in_pre_md'])
-        trig=ref*peak_target_pct; prox=ref*(PROX_MD if in_md else PROX_N)
-        cu=ref*bat_charge_upper_pct; cc=trig*CHG_GUARD; ec=trig*EMERG_GUARD
-        lkva={k:kva0*norm[k] for k in load_keys}; lfac={k:1.0 for k in load_keys}
-        bchg=bdis=0.0; acts=[]; mkw=kw; mkvar=kvar; mkva=_calc_kva(mkw,mkvar)
-        uh=False
-        for fi in range(idx+1,min(idx+lookahead_intervals+1,n)):
-            if float(df.iloc[fi]['kva'])>=float(df.iloc[fi]['_ref'])*peak_target_pct:
-                uh=True; break
-        # Discharge
-        if (kva0>=prox or uh) and mkva>=trig and soc>bdmin and mkw>0:
-            kwt=math.sqrt(max(trig**2-mkvar**2,0.0))
-            dkwn=max(mkw-kwt,0.0); dkwh=dkwn*INTERVAL_H/bat_efficiency
-            dkwh=min(dkwh,dis_rate*INTERVAL_H,soc-bdmin)
-            dkwl=dkwh*bat_efficiency/INTERVAL_H; sb=soc; soc-=dkwh
-            mkw-=dkwl; mkw=max(mkw,0.0); mkva=_calc_kva(mkw,mkvar); bdis=dkwl
-            la=bool(uh and kva0<prox)
-            acts.append({'type':'battery_discharge','load':'Battery',
-                'discharge_kw':round(dkwl,2),'soc_before_kwh':round(sb,1),
-                'soc_after_kwh':round(soc,1),'kva_before':round(kva0,2),
-                'kva_after':round(mkva,2),'lookahead_triggered':la,'md_hours':in_md,
-                'note':f'Discharged {round(dkwl,1)}kW; SOC {round(sb,0):.0f}→{round(soc,0):.0f}kWh'+
-                       (' [look-ahead]' if la else '')+(' [MD]' if in_md else '')})
-        # Load reduction
-        rem=max(0.0,mkva-trig)
-        if rem>1e-3:
-            for lk in priority_order:
-                if rem<=1e-3: break
-                if lk not in loads or lkva.get(lk,0)<=0: continue
-                mp=lkva[lk]*loads[lk].get('max_cut_pct',0.10)
-                cut=min(rem,mp); lfac[lk]=1.0-cut/lkva[lk]
-                pf=mkw/mkva if mkva>0 else 1.0; qf=mkvar/mkva if mkva>0 else 0.0
-                mkw-=cut*pf; mkvar-=cut*qf; mkw=max(mkw,0.0)
-                mkva=_calc_kva(mkw,mkvar); rem=max(0.0,mkva-trig)
-                if cut>0.05:
-                    acts.append({'type':'load_reduction','load':loads[lk].get('name',lk),
-                        'load_key':lk,'cut_kva':round(cut,2),
-                        'factor_pct':round(lfac[lk]*100,1),
-                        'max_cut_pct':loads[lk].get('max_cut_pct',0.10)*100,
-                        'note':f'{loads[lk].get("name",lk)} cut {round(cut,1)}kVA'})
-        # Charge
-        if bdis==0 and soc<bmax:
-            emg=soc<bemerg; ceil=ec if emg else cc
-            mchg=math.sqrt(max(ceil**2-mkvar**2,0.0))-mkw
-            mchwh=max(mchg,0.0)*bat_efficiency*INTERVAL_H
-            opk=(kva0<cu) or in_pre; norm_chg=opk and (soc<bfull) and not in_md
-            if mchwh>0.001 and (emg or norm_chg):
-                chwh=min(mchwh,chg_rate*INTERVAL_H,bmax-soc)
-                if chwh>0.01:
-                    chkw=chwh/bat_efficiency/INTERVAL_H; sb=soc; soc+=chwh; bchg=chkw
-                    mkw+=chkw; mkva=_calc_kva(mkw,mkvar)
-                    tstr='emergency' if emg else 'pre-MD boost' if in_pre else 'normal'
-                    acts.append({'type':'battery_charge','load':'Battery',
-                        'charge_kw':round(chkw,2),'soc_before_kwh':round(sb,1),
-                        'soc_after_kwh':round(soc,1),'kva_ceiling':round(ceil,2),
-                        'kva_after_charge':round(mkva,2),'charge_trigger':tstr,
-                        'note':f'{"Emergency" if emg else "Pre-MD" if in_pre else "Normal"} charge '+
-                               f'{round(chkw,1)}kW; SOC {round(sb,0):.0f}→{round(soc,0):.0f}kWh'})
-        soc=max(bmin,min(bmax,soc))
-        lmgd={k:lkva[k]*lfac[k] for k in load_keys}
-        lcut={k:(lkva[k]-lmgd[k])*INTERVAL_H for k in load_keys}
-        row_out={'timestamp':ts.isoformat(),'date':str(date),
-                 'kva_original':round(kva0,2),'kw_original':round(kw,2),
-                 'kvar_original':round(kvar,2),'kw_managed':round(mkw,2),
-                 'kvar_managed':round(mkvar,2),
-                 'battery_action_kw':round(bdis-bchg,2),
-                 'battery_charge_kw':round(bchg,2),'battery_discharge_kw':round(bdis,2),
-                 'battery_soc_kwh':round(soc,2),
-                 'battery_soc_pct':round(soc/bmax*100,1) if bmax else 0,
-                 'kva_managed':round(mkva,2),'target_peak':round(trig,2),
-                 'ref_peak':round(ref,2),'charge_threshold_upper':round(cu,2),
-                 'day_peak':round(day_pk.get(date,kva0),2),
-                 'bat_capacity':round(bmax,2),'in_md_hours':in_md,'in_pre_md':in_pre,
-                 'actions':acts}
-        for k in load_keys:
-            row_out[f'{k}_kva']=round(lkva[k],2); row_out[f'{k}_managed']=round(lmgd[k],2)
-            row_out[f'{k}_factor']=round(lfac[k],3); row_out[f'{k}_kvah_cut']=round(lcut[k],3)
-        results.append(row_out)
-    return results
+             md_start_hour=14, md_end_hour=22, pre_md_hours=2,
+             # v7 additions (SOC continuity + tuning)
+             initial_soc_kwh=None, discharge_target_pct=0.97,
+             soc_md_reserve_pct=0.70, md_reserve_lookahead_h=4.0):
+    """
+    Thin wrapper — delegates to manager.optimizer.run_ai_manager (v7).
+    Eliminates the previous code duplication between server.py and optimizer.py.
+    """
+    return _mgr_run_pkg(
+        df=df, loads=loads,
+        battery_capacity_kwh=battery_kwh,
+        priority_order=priority_order,
+        peak_target_pct=peak_target_pct,
+        bat_charge_upper_pct=bat_charge_upper_pct,
+        c_rate=c_rate,
+        initial_soc_pct=initial_soc_pct,
+        initial_soc_kwh=initial_soc_kwh,
+        bat_efficiency=bat_efficiency,
+        peak_reference_kva=peak_reference_kva,
+        lookahead_intervals=lookahead_intervals,
+        md_start_hour=md_start_hour,
+        md_end_hour=md_end_hour,
+        pre_md_hours=pre_md_hours,
+        discharge_target_pct=discharge_target_pct,
+        soc_md_reserve_pct=soc_md_reserve_pct,
+        md_reserve_lookahead_h=md_reserve_lookahead_h,
+    )
+
+# ── Minimal local kVA helper (used by pipeline helpers below) ────────────────
+def _calc_kva(kw, kvar):
+    return math.sqrt(kw * kw + kvar * kvar)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -462,7 +385,7 @@ def _auto_powerreco():
         _pl_log(f'PowerRECO error: {e}','error')
 
 def _pipeline_tick():
-    """Single assembly-line tick: Forecast -> Manager -> Bill -> PowerRECO."""
+    """Single assembly-line tick: Forecast → Manager → Bill → PowerRECO."""
     fc = S.get('forecaster')
     if fc is None:
         _pl_log('No forecaster — skipping tick','warn')
@@ -470,35 +393,58 @@ def _pipeline_tick():
     tick = PL['tick'] + 1
     _pl_log(f'Tick {tick} — generating forecast…','info')
     PL['status'] = 'forecasting'
-    # 1. Forecast
+
+    # 1. Fresh 48-step forecast from Predictor
     fr = fc.forecast(output_steps=48)
     S['forecast_result'] = fr
-    # 2. Convert to Manager df using historical PF
-    pf = _estimate_pf(S.get('df'))
+
+    # 2. Convert forecast to Manager input (kVAR derived from historical PF)
+    pf     = _estimate_pf(S.get('df'))
     mgr_df = _forecast_to_mgr_df(fr, pf)
-    # Peak reference from historical data (with buffer)
+
+    # Peak reference: 5 % buffer above historical max so the Manager
+    # still dispatches even on new-record days
     if S.get('df') is not None and 'kva' in S['df'].columns:
         peak_ref = float(S['df']['kva'].max()) * 1.05
     else:
         peak_ref = None
+
     # 3. Manager optimisation
     PL['status'] = 'optimizing'
-    _pl_log(f'Tick {tick} — running AI Manager on {len(mgr_df)} forecast intervals…','info')
-    loads    = S.get('pipeline_loads')  or {'ev':{'name':'EV Charger','proportion':0.30,'max_cut_pct':0.10},'hvac':{'name':'HVAC','proportion':0.40,'max_cut_pct':0.15},'misc':{'name':'Misc','proportion':0.30,'max_cut_pct':0.20}}
+    battery_kwh = S.get('pipeline_battery_kwh', 200)
+    _pl_log(f'Tick {tick} — Manager on {len(mgr_df)} intervals'
+            f' (SOC carry: {S.get("last_soc_kwh") is not None})','info')
+
+    loads    = S.get('pipeline_loads') or {
+        'ev':   {'name':'EV Charger','proportion':0.30,'max_cut_pct':0.10},
+        'hvac': {'name':'HVAC',      'proportion':0.40,'max_cut_pct':0.15},
+        'misc': {'name':'Misc',      'proportion':0.30,'max_cut_pct':0.20},
+    }
     priority = S.get('pipeline_priority') or list(reversed(list(loads.keys())))
-    results = _mgr_run(mgr_df, loads,
-                       S.get('pipeline_battery_kwh',200),
-                       priority,
-                       S.get('pipeline_peak_target',0.85),
-                       S.get('pipeline_charge_upper',0.70),
-                       c_rate          = S.get('pipeline_c_rate',0.5),
-                       initial_soc_pct = S.get('pipeline_init_soc',0.50),
-                       bat_efficiency  = S.get('pipeline_bat_eff',0.95),
-                       peak_reference_kva = peak_ref,
-                       lookahead_intervals= S.get('pipeline_lookahead',16),
-                       md_start_hour   = S.get('pipeline_md_start',14),
-                       md_end_hour     = S.get('pipeline_md_end',22),
-                       pre_md_hours    = S.get('pipeline_pre_md_hours',2))
+
+    results = _mgr_run(
+        mgr_df, loads, battery_kwh, priority,
+        S.get('pipeline_peak_target',   0.85),
+        S.get('pipeline_charge_upper',  0.70),
+        c_rate              = S.get('pipeline_c_rate',       0.5),
+        bat_efficiency      = S.get('pipeline_bat_eff',      0.95),
+        # [FIX-9] SOC continuity: carry forward final SOC from previous tick
+        initial_soc_kwh     = S.get('last_soc_kwh'),   # None on first tick → uses initial_soc_pct
+        initial_soc_pct     = S.get('pipeline_init_soc', 0.50),
+        peak_reference_kva  = peak_ref,
+        lookahead_intervals = S.get('pipeline_lookahead', 16),
+        md_start_hour       = S.get('pipeline_md_start',  14),
+        md_end_hour         = S.get('pipeline_md_end',    22),
+        pre_md_hours        = S.get('pipeline_pre_md_hours', 2),
+        discharge_target_pct= 0.97,   # dispatch to 97 % of trigger
+        soc_md_reserve_pct  = 0.70,   # protect 70 % SOC before MD
+        md_reserve_lookahead_h = 4.0,
+    )
+
+    # Persist final SOC for next tick [FIX-9]
+    if results:
+        final_soc = results[-1].get('final_soc_kwh') or results[-1].get('battery_soc_kwh')
+        S['last_soc_kwh'] = float(final_soc) if final_soc is not None else None
     S['manager_results']  = results
     S['manager_loads']    = loads
     mgr_meta = _build_mgr_summary(results, list(loads.keys()))
