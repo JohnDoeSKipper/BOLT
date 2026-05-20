@@ -224,12 +224,14 @@ def run_ai_manager(
     BAT_HARD_MIN_PCT     = 0.05    # absolute SoC floor (hardware protection)
     BAT_EMERGENCY_PCT    = 0.15    # SoC at which emergency charging triggers
     BAT_CHARGE_FULL_PCT  = 0.90    # normal charge ceiling (don't fill to 100 %)
-    PROX_NORMAL          = 0.80    # discharge when kVA ≥ 80 % of ref_peak (off-MD)
-    PROX_MD              = 0.70    # discharge when kVA ≥ 70 % of ref_peak (MD hours)
-    CHARGE_GUARD_PCT     = 0.88    # charging kVA ceiling as fraction of trigger
-                                   # = 0.88 × peak_target × ref_peak  (was 0.92)
-    EMERG_GUARD_PCT      = 0.95    # [FIX-6] emergency ceiling, was 1.00
-    MIN_DISCHARGE_KW     = 0.5     # [FIX-8] suppress micro-discharge actions below this
+    PROX_NORMAL          = 0.80    # discharge awareness zone: 80 % of ref (off-MD)
+    PROX_MD              = 0.70    # discharge awareness zone: 70 % of ref (MD hours)
+    CHARGE_GUARD_PCT     = 0.92    # charging kVA ceiling as fraction of trigger
+                                   # = 0.92 × peak_target × ref_peak
+                                   # The ceiling formula is the real guard — 0.92 gives
+                                   # more charging headroom without risking new peaks.
+    EMERG_GUARD_PCT      = 0.95    # emergency ceiling, 5 % below trigger
+    MIN_DISCHARGE_KW     = 0.5     # suppress micro-discharge actions below this kW
 
     eff_chg_rate = battery_capacity_kwh * (charge_c_rate if charge_c_rate else c_rate)
     eff_dis_rate = battery_capacity_kwh * c_rate
@@ -299,23 +301,21 @@ def run_ai_manager(
 
         # Core thresholds
         discharge_trigger   = ref_peak * peak_target_pct
-        # [FIX-2] Discharge target is slightly below trigger to avoid recording trigger as peak
-        dispatch_target     = discharge_trigger * discharge_target_pct
+        dispatch_target     = discharge_trigger * discharge_target_pct  # 97 % level
         discharge_proximity = ref_peak * (PROX_MD if in_md else PROX_NORMAL)
         charge_upper        = ref_peak * bat_charge_upper_pct
         charge_kva_ceil     = discharge_trigger * CHARGE_GUARD_PCT
-        emerg_kva_ceil      = discharge_trigger * EMERG_GUARD_PCT  # [FIX-6] was 1.00
+        emerg_kva_ceil      = discharge_trigger * EMERG_GUARD_PCT
 
-        # [FIX-13] Post-MD: relax charge_upper to allow recharge even under moderate load
+        # Post-MD: relax charge_upper to allow recharge under moderate evening load
         if in_post_md and not in_md:
             charge_upper = ref_peak * min(0.90, bat_charge_upper_pct + 0.15)
 
-        # ── [FIX-3] Quantified look-ahead ──────────────────────────────────────
-        # Scan upcoming intervals; find max kVA and total kWh deficit
-        upcoming_max_kva       = 0.0
-        upcoming_kwh_needed    = 0.0
-        upcoming_high          = False
-        intervals_above_trigger= 0
+        # ── Quantified look-ahead ───────────────────────────────────────────────
+        # Scan upcoming intervals for peak severity and total energy required.
+        upcoming_max_kva    = 0.0
+        upcoming_kwh_needed = 0.0
+        upcoming_high       = False
         pf_approx = kw / kva_orig if kva_orig > 1.0 else 0.85
 
         for fi in range(idx + 1, min(idx + lookahead_intervals + 1, n)):
@@ -324,43 +324,42 @@ def run_ai_manager(
             f_ref  = float(frow['_ref_peak'])
             f_trig = f_ref * peak_target_pct
             if f_kva >= f_trig:
-                upcoming_high = True
-                intervals_above_trigger += 1
+                upcoming_high    = True
                 upcoming_max_kva = max(upcoming_max_kva, f_kva)
-                # Approximate kW above trigger needed to flatten this interval
-                f_kw_approx  = f_kva * pf_approx
-                f_kvar_approx= f_kva * math.sqrt(max(1.0 - pf_approx**2, 0))
-                f_kw_target  = math.sqrt(max(f_trig**2 - f_kvar_approx**2, 0.0))
-                excess_kw    = max(f_kw_approx - f_kw_target, 0.0)
+                f_kw_approx   = f_kva * pf_approx
+                f_kvar_approx = f_kva * math.sqrt(max(1.0 - pf_approx ** 2, 0.0))
+                f_kw_target   = math.sqrt(max(f_trig ** 2 - f_kvar_approx ** 2, 0.0))
+                excess_kw     = max(f_kw_approx - f_kw_target, 0.0)
                 upcoming_kwh_needed += excess_kw * INTERVAL_H / bat_efficiency
 
-        # Severity factor: scales proximity zone to pre-discharge earlier for large peaks
-        # severity = 1.0 (at trigger) → 1.3 (30 % above trigger) — caps at 1.3
-        if upcoming_max_kva > 0 and discharge_trigger > 0:
-            peak_severity = min(1.30, upcoming_max_kva / discharge_trigger)
-        else:
-            peak_severity = 1.0
+        # Cap kwh_needed at battery capacity — avoids misleading values in output
+        upcoming_kwh_needed = min(upcoming_kwh_needed, battery_capacity_kwh)
 
-        # Effective proximity: wider when a severe peak is detected
-        eff_proximity = discharge_proximity * (1.0 / peak_severity)  # shrink % threshold
-        in_peak_zone  = kva_orig >= eff_proximity or upcoming_high
+        # Awareness zone: proximity is fixed; upcoming_high flag triggers pre-awareness
+        in_peak_zone = kva_orig >= discharge_proximity or upcoming_high
 
-        # ── [FIX-4] Dynamic minimum SOC (MD reserve protection) ───────────────
-        # Within md_reserve_lookahead_h of MD start, protect SOC reserve
-        hours_to_md_start = (md_start_hour - hour) % 24
+        # ── Dynamic minimum SOC (MD reserve protection) ─────────────────────────
+        # Use exact minutes for precise pre-MD throttling (not just integer hours)
+        ts_minute         = int(ts.minute) if hasattr(ts, 'minute') else 0
+        ts_total_min      = hour * 60 + ts_minute
+        md_start_total_min= md_start_hour * 60
+        minutes_to_md     = (md_start_total_min - ts_total_min) % (24 * 60)
+        hours_to_md_start = minutes_to_md / 60.0   # float — exact, not rounded
+
         in_md_reserve_window = (
             not in_md
-            and not in_pre_md       # pre-MD boost will handle it
+            and not in_pre_md           # pre-MD boost handles it
             and 0 < hours_to_md_start <= md_reserve_lookahead_h
         )
-        # Effective minimum SOC for discharge
+        # Effective minimum SOC for discharge this interval
         if in_md:
-            bat_dis_min = bat_hard_min               # inside MD: use everything available
+            bat_dis_min = bat_hard_min               # inside MD: deploy everything
         elif in_md_reserve_window:
-            # Reserve at least bat_md_res, but never block emergency
-            bat_dis_min = max(bat_hard_min, bat_md_res * 0.5)
+            # Protect 25 % of MD reserve so peaks in pre-reserve hours are still shaved.
+            # (was 50 % — too conservative; blocked service before MD started)
+            bat_dis_min = max(bat_hard_min, bat_md_res * 0.25)
         else:
-            bat_dis_min = battery_capacity_kwh * 0.15  # standard 15 %
+            bat_dis_min = battery_capacity_kwh * 0.15  # standard 15 % floor
 
         # ── Working variables ──────────────────────────────────────────────────
         load_kva    = {k: kva_orig * norm[k] for k in load_keys}
@@ -399,7 +398,7 @@ def run_ai_manager(
                 mgd_kva    = calc_kva(mgd_kw, mgd_kvar)
                 bat_dis_kw = dis_kw_load
 
-                la_trig = bool(upcoming_high and kva_orig < eff_proximity)
+                la_trig = bool(upcoming_high and kva_orig < discharge_proximity)
                 actions.append({
                     'type':                'battery_discharge',
                     'load':                'Battery',
@@ -417,7 +416,7 @@ def run_ai_manager(
                         f'kVA {round(kva_orig, 1)} → {round(mgd_kva, 1)}; '
                         f'SOC {round(soc_before, 0):.0f} → {round(bat_soc, 0):.0f} kWh'
                         + (' [look-ahead]' if la_trig else '')
-                        + (f' [severity {peak_severity:.2f}]' if peak_severity > 1.05 else '')
+                        + (f' [upcoming {upcoming_max_kva:.0f} kVA]' if upcoming_max_kva > 0 else '')
                         + (' [MD hrs]' if in_md else '')
                     ),
                 })
@@ -488,7 +487,7 @@ def run_ai_manager(
                 # [FIX-5] Throttle pre-MD charge rate to exactly what's needed
                 #         to reach soc_md_reserve_pct by MD start.
                 if in_pre_md and not emergency:
-                    hours_to_md = max(0.25, hours_to_md_start)
+                    hours_to_md = max(0.25, hours_to_md_start)  # now exact float
                     soc_target  = bat_md_res
                     soc_deficit = max(0.0, soc_target - bat_soc)
                     # kW needed = deficit / (hours × η) — cap at hardware C-rate
@@ -514,7 +513,7 @@ def run_ai_manager(
                     trigger_str = (
                         'emergency'    if emergency   else
                         'pre-MD boost' if in_pre_md   else
-                        'post-MD refil'if in_post_md  else
+                        'post-MD refill' if in_post_md else
                         'normal'
                     )
                     actions.append({
@@ -560,7 +559,7 @@ def run_ai_manager(
             'ref_peak':               round(ref_peak,  2),
             'charge_threshold_upper': round(charge_upper, 2),         # [FIX-10] was missing
             'charge_kva_ceiling':     round(charge_kva_ceil, 2),
-            'discharge_proximity':    round(eff_proximity, 2),
+            'discharge_proximity':    round(discharge_proximity, 2),
             'in_md_hours':            in_md,
             'in_pre_md':              in_pre_md,
             'in_post_md':             in_post_md,
