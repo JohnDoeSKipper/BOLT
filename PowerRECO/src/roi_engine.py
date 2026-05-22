@@ -82,8 +82,11 @@ def calculate_roi(
     cumulative_npv = []
 
     for yr in range(1, SOLAR_LIFE_YEARS + 1):
-        solar_f = (1.0 - SOLAR_DEGRADATION) ** yr
-        batt_f  = (1.0 - BATT_DEGRADATION)  ** min(yr, BATTERY_LIFE_YEARS)
+        solar_f  = (1.0 - SOLAR_DEGRADATION) ** yr
+        # After replacement at year 10 the new battery starts at age 0,
+        # so age resets: years 1-10 use natural age, years 11-25 use age from replacement.
+        batt_age = yr if yr <= BATTERY_LIFE_YEARS else yr - BATTERY_LIFE_YEARS
+        batt_f   = (1.0 - BATT_DEGRADATION) ** batt_age
 
         yr_benefit = (
             self_consumed_kwh  * solar_f * ENERGY_RATE_C1 * TAX_MULTIPLIER
@@ -105,14 +108,20 @@ def calculate_roi(
 
     irr = _irr(total_capex, cashflows)
 
+    # ── ROI % (undiscounted 25-yr cashflows / initial CAPEX) ─────────────────
+    # ROI > 200% means the system returns more than 2× the initial investment
+    # in net savings over 25 years (after battery replacement at year 10).
+    total_25yr_cashflows = sum(cashflows)
+    roi_pct = round(total_25yr_cashflows / total_capex * 100, 1) if total_capex > 0 else None
+
     # ── CO₂ offset ────────────────────────────────────────────────────────────
     co2_offset = annual_gen_kwh * GRID_EMISSION_FACTOR
 
     return {
         # Costs
-        "solar_capex_rm":          round(solar_capex),
-        "battery_capex_rm":        round(battery_capex),
-        "total_capex_rm":          round(total_capex),
+        "solar_capex_rm":           round(solar_capex),
+        "battery_capex_rm":         round(battery_capex),
+        "total_capex_rm":           round(total_capex),
         # Annual benefits (Year 1)
         "annual_energy_savings_rm": round(annual_energy_save),
         "annual_nem_credit_rm":     round(annual_nem_credit),
@@ -120,20 +129,22 @@ def calculate_roi(
         "total_annual_benefit_rm":  round(total_annual_benefit_yr1),
         "monthly_net_benefit_rm":   round(total_annual_benefit_yr1 / 12),
         # Financial metrics
-        "simple_payback_years":    round(simple_payback, 1),
-        "npv_25yr_rm":             round(npv),
-        "irr_pct":                 round(irr * 100, 1) if irr is not None else None,
-        "cumulative_npv":          cumulative_npv,
+        "simple_payback_years":     round(simple_payback, 1),
+        "npv_25yr_rm":              round(npv),
+        "irr_pct":                  round(irr * 100, 1) if irr is not None else None,
+        "roi_pct":                  roi_pct,
+        "total_25yr_cashflows":     round(total_25yr_cashflows),
+        "cumulative_npv":           cumulative_npv,
         # Generation details
-        "annual_gen_kwh":          round(annual_gen_kwh),
+        "annual_gen_kwh":           round(annual_gen_kwh),
         "self_consumed_kwh_annual": round(self_consumed_kwh),
         "exported_kwh_annual":      round(exported_kwh),
         # Environment
-        "co2_offset_tonnes_yr":    round(co2_offset, 1),
+        "co2_offset_tonnes_yr":     round(co2_offset, 1),
         # Rates used (for transparency)
-        "md_rate_used":            md_rate,
-        "energy_rate_used":        ENERGY_RATE_C1,
-        "nem_rate_used":           NEM_BUYBACK,
+        "md_rate_used":             md_rate,
+        "energy_rate_used":         ENERGY_RATE_C1,
+        "nem_rate_used":            NEM_BUYBACK,
     }
 
 

@@ -8,7 +8,7 @@ from src.data_connector import parse_manager_output, parse_predictor_output, ext
 
 print("All imports OK")
 
-sr = calculate_solar_sizing(200.0, 415, 4.5)
+sr = calculate_solar_sizing(200.0, panel_area_m2=2.0, panel_wattage_w=415, psh=4.5)
 print(f"Solar: {sr['system_kwp']} kWp, {sr['n_panels']} panels, {sr['annual_generation_kwh']:,} kWh/yr")
 print(f"  usable_area={sr['usable_area_m2']} m2, monthly_avg={sr['monthly_generation_kwh_avg']:,} kWh")
 
@@ -16,7 +16,7 @@ rr = calculate_roi(sr['system_kwp'], 50.0, sr['monthly_generation_kwh_avg'], 80.
 print(f"ROI: payback={rr['simple_payback_years']}yr, NPV=RM{rr['npv_25yr_rm']:,}, IRR={rr['irr_pct']}%")
 print(f"  energy_save=RM{rr['annual_energy_savings_rm']:,}/yr, MD_save=RM{rr['annual_md_savings_rm']:,}/yr")
 
-print(f"Battery factor: 1/{ROUNDTRIP_EFF}/0.60 -> upsize={UPSIZE_FACTOR:.4f}")
+print(f"Battery upsize factor: 1/DOD(0.60) = {UPSIZE_FACTOR:.4f}  |  roundtrip_eff = {ROUNDTRIP_EFF}")
 
 manual_kwh = 50.0
 usable = manual_kwh / ROUNDTRIP_EFF

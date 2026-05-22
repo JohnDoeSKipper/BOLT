@@ -4,7 +4,6 @@ Derives minimum battery capacity from the BOLT Manager's optimization output.
 """
 from __future__ import annotations
 import math
-import numpy as np
 import pandas as pd
 
 # Battery operating parameters (LFP chemistry)
@@ -116,26 +115,37 @@ def _resolve_discharge(
         if col in df.columns:
             return df[col].clip(lower=0).fillna(0), col
 
-    # Infer kW reduction from before/after columns, then convert to kWh
+    # Infer kW reduction from before/after columns, then convert to kWh.
+    # kVA pairs require PF conversion (×0.95); kW pairs are already in kW.
     for before, after in [
         ("original_kva", "optimized_kva"),
         ("kva_before", "kva_after"),
+    ]:
+        if before in df.columns and after in df.columns:
+            kva_reduction = (df[before] - df[after]).clip(lower=0).fillna(0)
+            kwh_series = kva_reduction * 0.95 * interval_h  # kVA → kW → kWh
+            return kwh_series, f"derived({before}–{after})"
+
+    for before, after in [
         ("kw_before", "kw_after"),
         ("demand_before_kw", "demand_after_kw"),
     ]:
         if before in df.columns and after in df.columns:
-            # kVA difference → kW (assume PF ≈ 0.95 for industrial)
-            kva_reduction = (df[before] - df[after]).clip(lower=0).fillna(0)
-            kw_series = kva_reduction * 0.95
-            kwh_series = kw_series * interval_h
+            kw_reduction = (df[before] - df[after]).clip(lower=0).fillna(0)
+            kwh_series = kw_reduction * interval_h  # already kW
             return kwh_series, f"derived({before}–{after})"
 
-    # Direct kW reduction column
+    # Direct kW reduction columns (no PF conversion needed)
     for col in ["kw_reduction", "load_reduced_kw", "reduction_kw",
-                "delta_kw", "action_kw", "kva_reduction"]:
+                "delta_kw", "action_kw"]:
         if col in df.columns:
             kwh_series = df[col].clip(lower=0).fillna(0) * interval_h
             return kwh_series, col
+
+    # kVA reduction column — apply PF 0.95 before converting to kWh
+    if "kva_reduction" in df.columns:
+        kwh_series = df["kva_reduction"].clip(lower=0).fillna(0) * 0.95 * interval_h
+        return kwh_series, "kva_reduction"
 
     raise ValueError(
         "PowerRECO cannot find discharge data in the Manager output. "
@@ -153,17 +163,27 @@ def _find_ts_col(df: pd.DataFrame) -> str | None:
 
 def _estimate_md_reduction(df: pd.DataFrame, interval_h: float) -> float:
     """Best estimate of peak demand reduction (kW) achieved by the battery."""
+    # kVA pairs — apply PF 0.95 to convert to kW
     for before, after in [
         ("original_kva", "optimized_kva"),
         ("kva_before", "kva_after"),
+    ]:
+        if before in df.columns and after in df.columns:
+            reduction = (df[before] - df[after]).clip(lower=0)
+            nonzero = reduction[reduction > 0]
+            if len(nonzero):
+                return float(nonzero.quantile(0.95)) * 0.95  # kVA → kW
+
+    # kW pairs — already in kW, no PF conversion
+    for before, after in [
         ("kw_before", "kw_after"),
     ]:
         if before in df.columns and after in df.columns:
             reduction = (df[before] - df[after]).clip(lower=0)
-            # Use 95th percentile of non-zero reductions as the MD saving
             nonzero = reduction[reduction > 0]
             if len(nonzero):
-                return float(nonzero.quantile(0.95)) * 0.95  # convert kVA→kW
+                return float(nonzero.quantile(0.95))
+
     for col in ["kw_reduction", "reduction_kw", "md_reduction_kw"]:
         if col in df.columns:
             nonzero = df[col][df[col] > 0]

@@ -5,14 +5,10 @@ Calculates optimal solar panel array size based on available roof area.
 from __future__ import annotations
 import math
 
-# Physical constants for modern monocrystalline PERC/TOPCon panels
-_PANEL_W_M = 1.134          # panel width in metres
-_PANEL_H_M = 1.762          # panel height in metres
-_PANEL_AREA_M2 = _PANEL_W_M * _PANEL_H_M          # ~2.00 m²
+# Physical constants
 _SPACING_FACTOR = 1.05      # 5% extra for mounting rail clearance
 
 USABLE_ROOF_FRACTION = 0.85                               # 85% of total roof
-EFFECTIVE_PANEL_AREA_M2 = _PANEL_AREA_M2 * _SPACING_FACTOR  # ~2.10 m²
 SYSTEM_DERATE = 0.80        # 80%: inverter, wiring, soiling, temperature losses
 
 # Malaysia seasonal irradiance multipliers (Peninsular, Jan–Dec)
@@ -26,6 +22,7 @@ MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
 
 def calculate_solar_sizing(
     roof_area_m2: float,
+    panel_area_m2: float = 2.0,
     panel_wattage_w: int = 415,
     psh: float = 4.5,
 ) -> dict:
@@ -34,6 +31,7 @@ def calculate_solar_sizing(
 
     Args:
         roof_area_m2:    Total roof area in square metres.
+        panel_area_m2:   Physical surface area of one panel in m² (default 2.0 m²).
         panel_wattage_w: Rated output per panel in watts (default 415 W).
         psh:             Peak sun hours per day for the site (Malaysia avg 4.5).
 
@@ -41,15 +39,18 @@ def calculate_solar_sizing(
         dict with all sizing parameters and generation estimates.
     """
     usable_m2 = roof_area_m2 * USABLE_ROOF_FRACTION
-    n_panels = math.floor(usable_m2 / EFFECTIVE_PANEL_AREA_M2)
+    effective_panel_area = panel_area_m2 * _SPACING_FACTOR   # include mounting clearance
+    n_panels = math.floor(usable_m2 / effective_panel_area)
     system_kwp = round(n_panels * panel_wattage_w / 1_000, 2)
 
     annual_kwh = system_kwp * psh * 365 * SYSTEM_DERATE
     monthly_kwh_avg = annual_kwh / 12
     daily_kwh_avg = annual_kwh / 365
 
+    # Distribute annual_kwh proportionally so the monthly values sum to annual_kwh.
+    _factor_sum = sum(SEASONAL_FACTORS)
     monthly_breakdown = [
-        round(monthly_kwh_avg * f) for f in SEASONAL_FACTORS
+        round(annual_kwh * f / _factor_sum) for f in SEASONAL_FACTORS
     ]
 
     return {
@@ -57,8 +58,9 @@ def calculate_solar_sizing(
         "usable_area_m2": round(usable_m2, 2),
         "coverage_pct": USABLE_ROOF_FRACTION * 100,
         "n_panels": n_panels,
+        "panel_area_m2": panel_area_m2,
         "panel_wattage_w": panel_wattage_w,
-        "effective_panel_area_m2": round(EFFECTIVE_PANEL_AREA_M2, 2),
+        "effective_panel_area_m2": round(effective_panel_area, 3),
         "system_kwp": system_kwp,
         "psh": psh,
         "system_derate_pct": SYSTEM_DERATE * 100,

@@ -5,7 +5,6 @@ Parses and normalises outputs from the BOLT Manager and Predictor.
 from __future__ import annotations
 import json
 import io
-import numpy as np
 import pandas as pd
 
 
@@ -77,9 +76,9 @@ def _parse_timestamp(df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             try:
                 df["timestamp"] = pd.to_datetime(df[col])
+                break  # only stop searching once we successfully parse a column
             except Exception:
-                pass
-            break
+                pass   # column exists but isn't parseable — try next candidate
     return df
 
 
