@@ -186,7 +186,11 @@ with st.sidebar:
         help="Quarterly surcharge (+) or rebate (−) set by Suruhanjaya Tenaga. 0 = exempt / not applicable.",
     )
 
-    has_solar_flag = st.session_state.has_solar
+    _ms = st.session_state.monthly_stats
+    has_solar_flag = bool(
+        st.session_state.has_solar or
+        (_ms is not None and len(_ms) > 0 and bool((_ms["export_kwh"] > 0).any()))
+    )
     nem_rate = NEM_DEFAULT_RATE
     if has_solar_flag:
         st.markdown("**☀️ Solar NEM Settings**")
@@ -198,8 +202,8 @@ with st.sidebar:
 
     st.divider()
     with st.expander("⚙️ Advanced"):
-        apply_st  = st.checkbox("Apply Service Tax (6%)", value=True,
-            help="Non-domestic only. Tariff A is always exempt.")
+        apply_st  = st.checkbox("Apply Service Tax (8%)", value=True,
+            help="Non-domestic only. Tariff A is always exempt. Rate raised from 6% to 8% in March 2024.")
         apply_kb  = st.checkbox("Apply KWTBB (1.6%)", value=True,
             help="Kumpulan Wang Tenaga Boleh Baharu — non-domestic only.")
         intvl_ov  = st.number_input(
@@ -222,18 +226,18 @@ if st.session_state.df is None:
 
     st.subheader("📋 TNB Tariff Quick Reference (Peninsular Malaysia)")
     st.dataframe(pd.DataFrame([
-        {"Tariff": "A",  "Category": "Domestic",             "Voltage Supply": "Low (240 V / 415 V)",  "Energy Rate": "Tiered  RM 0.218 – 0.571 / kWh", "MD (RM/kW)": "—",     "Min Bill": "RM 3.00",   "Service Tax": "Exempt"},
-        {"Tariff": "B",  "Category": "LV Commercial",        "Voltage Supply": "Low (240 V / 415 V)",  "Energy Rate": "RM 0.435 / kWh (flat)",           "MD (RM/kW)": "—",     "Min Bill": "RM 7.20",   "Service Tax": "6 %"},
-        {"Tariff": "C1", "Category": "MV General",           "Voltage Supply": "Medium (6.6–22 kV)",   "Energy Rate": "RM 0.365 / kWh (flat)",           "MD (RM/kW)": "30.30", "Min Bill": "RM 600.00", "Service Tax": "6 %"},
-        {"Tariff": "C2", "Category": "MV Time-of-Use",       "Voltage Supply": "Medium (6.6–22 kV)",   "Energy Rate": "Peak 0.365 / Off-peak 0.219",     "MD (RM/kW)": "30.30", "Min Bill": "RM 600.00", "Service Tax": "6 %"},
-        {"Tariff": "D",  "Category": "HV General",           "Voltage Supply": "High (33–132 kV)",     "Energy Rate": "RM 0.337 / kWh (flat)",           "MD (RM/kW)": "29.60", "Min Bill": "RM 600.00", "Service Tax": "6 %"},
-        {"Tariff": "E1", "Category": "HV Peak/Off-Peak",     "Voltage Supply": "High (33–132 kV)",     "Energy Rate": "Peak 0.337 / Off-peak 0.202",     "MD (RM/kW)": "29.60", "Min Bill": "RM 600.00", "Service Tax": "6 %"},
-        {"Tariff": "E2", "Category": "HV TOU (MD ≥ 1500 kW)","Voltage Supply": "High (33–132 kV)",    "Energy Rate": "Peak 0.337 / Off-peak 0.202",     "MD (RM/kW)": "29.60", "Min Bill": "RM 600.00", "Service Tax": "6 %"},
+        {"Tariff": "A",  "Category": "Domestic",             "Voltage Supply": "Low (240 V / 415 V)",  "Energy Rate": "Tiered  RM 0.218 – 0.571 / kWh", "MD (RM/kW)": "—",      "Min Bill": "RM 3.00",   "Service Tax": "Exempt"},
+        {"Tariff": "B",  "Category": "LV Commercial",        "Voltage Supply": "Low (240 V / 415 V)",  "Energy Rate": "RM 0.435 / kWh (flat)",           "MD (RM/kW)": "—",      "Min Bill": "RM 7.20",   "Service Tax": "8 %"},
+        {"Tariff": "C1", "Category": "MV General",           "Voltage Supply": "Medium (6.6–22 kV)",   "Energy Rate": "RM 0.365 / kWh (flat)",           "MD (RM/kW)": "97.06",  "Min Bill": "RM 600.00", "Service Tax": "8 %"},
+        {"Tariff": "C2", "Category": "MV Time-of-Use",       "Voltage Supply": "Medium (6.6–22 kV)",   "Energy Rate": "Peak 0.365 / Off-peak 0.219",     "MD (RM/kW)": "97.06",  "Min Bill": "RM 600.00", "Service Tax": "8 %"},
+        {"Tariff": "D",  "Category": "HV General",           "Voltage Supply": "High (33–132 kV)",     "Energy Rate": "RM 0.337 / kWh (flat)",           "MD (RM/kW)": "97.06",  "Min Bill": "RM 600.00", "Service Tax": "8 %"},
+        {"Tariff": "E1", "Category": "HV Peak/Off-Peak",     "Voltage Supply": "High (33–132 kV)",     "Energy Rate": "Peak 0.337 / Off-peak 0.202",     "MD (RM/kW)": "97.06",  "Min Bill": "RM 600.00", "Service Tax": "8 %"},
+        {"Tariff": "E2", "Category": "HV TOU (MD ≥ 1500 kW)","Voltage Supply": "High (33–132 kV)",    "Energy Rate": "Peak 0.337 / Off-peak 0.202",     "MD (RM/kW)": "97.06",  "Min Bill": "RM 600.00", "Service Tax": "8 %"},
     ]), use_container_width=True, hide_index=True)
 
     st.caption(
         "Peak hours (TOU tariffs): 08:00–22:00, Monday–Saturday.  "
-        "KWTBB 1.6% and Service Tax 6% apply to non-domestic tariffs.  "
+        "KWTBB 1.6% and Service Tax 8% apply to non-domestic tariffs.  "
         "Solar NEM credit applied after all charges."
     )
     st.stop()
@@ -241,6 +245,10 @@ if st.session_state.df is None:
 
 # ─── Tabs ──────────────────────────────────────────────────────────────────────
 df      = st.session_state.df
+if df is None:
+    st.info("👈  Upload a load-profile file in the sidebar to begin.")
+    st.stop()
+
 mstats  = st.session_state.monthly_stats
 intvl   = intvl_ov
 is_dom  = selected == "A"
@@ -289,24 +297,23 @@ with tab_usage:
 
     # ── Load profile chart ────────────────────────────────────────────────────
     st.subheader("Load Profile — Grid Import")
-    is_tou = TARIFF_META[selected]["tou"]
     fig = go.Figure()
 
-    if is_tou:
-        df_p = df.copy()
-        df_p["is_peak"] = df_p["timestamp"].apply(is_peak_hour)
-        fig.add_trace(go.Scatter(
-            x=df_p.loc[~df_p["is_peak"], "timestamp"],
-            y=df_p.loc[~df_p["is_peak"], "kw_import"],
-            mode="lines", name="Off-Peak", line=dict(color="#00b4d8", width=1.2)))
-        fig.add_trace(go.Scatter(
-            x=df_p.loc[df_p["is_peak"], "timestamp"],
-            y=df_p.loc[df_p["is_peak"], "kw_import"],
-            mode="lines", name="Peak  (08:00–22:00, Mon–Sat)", line=dict(color="#ff6b35", width=1.2)))
-    else:
-        fig.add_trace(go.Scatter(
-            x=df["timestamp"], y=df["kw_import"],
-            mode="lines", name="kW Import", line=dict(color="#0077b6", width=1.5)))
+    df_p = df.copy()
+    df_p["is_peak"] = (df_p["timestamp"] - pd.Timedelta(minutes=intvl)).apply(is_peak_hour)
+    peak_y    = df_p["kw_import"].where(df_p["is_peak"])
+    offpeak_y = df_p["kw_import"].where(~df_p["is_peak"])
+    fig.add_trace(go.Scatter(
+        x=df_p["timestamp"], y=offpeak_y,
+        mode="lines", name="Off-Peak  (22:00–08:00 daily, Sun & PH all day)",
+        line=dict(color="#00b4d8", width=1.0),
+        fill="tozeroy", fillcolor="rgba(0,180,216,0.15)"))
+    fig.add_trace(go.Scatter(
+        x=df_p["timestamp"], y=peak_y,
+        mode="lines", name="Peak  (08:00–22:00, Mon–Sat, excl. PH)",
+        line=dict(color="#ff6b35", width=1.0),
+        fill="tozeroy", fillcolor="rgba(255,107,53,0.18)"))
+    del df_p
 
     # Mark absolute peak
     pi = df["kw_import"].idxmax()
@@ -377,18 +384,20 @@ with tab_bill:
         chosen = (st.selectbox("Billing month", months, index=len(months) - 1)
                   if len(months) > 1 else months[0])
 
-        row   = mstats[mstats["month"].astype(str) == chosen].iloc[0]
-        t_kwh = float(row["total_kwh"])
-        p_kwh = float(row["peak_kwh"])
-        o_kwh = float(row["offpeak_kwh"])
-        md_kw = float(row["max_demand_kw"])
+        row    = mstats[mstats["month"].astype(str) == chosen].iloc[0]
+        t_kwh  = float(row["total_kwh"])
+        p_kwh  = float(row["peak_kwh"])
+        o_kwh  = float(row["offpeak_kwh"])
+        md_kw  = float(row["max_demand_kw"])
         ex_kwh = float(row["export_kwh"])
+        avg_pf_val = float(row["avg_pf"])
 
         bill = calculate_bill(
             tariff=selected,
             monthly_kwh=t_kwh, peak_kwh=p_kwh, offpeak_kwh=o_kwh,
             max_demand_kw=md_kw, icpt_sen_per_kwh=icpt_sen,
             apply_service_tax=use_st, apply_kwtbb=use_kb,
+            avg_pf=avg_pf_val,
         )
 
         # NEM credit
@@ -408,11 +417,12 @@ with tab_bill:
 
         # Input summary
         with st.expander("📥 Inputs used for this calculation"):
-            ci1, ci2, ci3, ci4 = st.columns(4)
+            ci1, ci2, ci3, ci4, ci5 = st.columns(5)
             ci1.metric("Total kWh", f"{t_kwh:,.1f}")
             ci2.metric("Peak kWh",  f"{p_kwh:,.1f}")
             ci3.metric("Off-Peak",  f"{o_kwh:,.1f}")
-            ci4.metric("Max Demand",f"{md_kw:.1f} kW")
+            ci4.metric("Max Demand", f"{md_kw:.1f} kW")
+            ci5.metric("Avg Power Factor", f"{avg_pf_val:.4f}")
             if has_export:
                 st.metric("Solar Export", f"{ex_kwh:,.1f} kWh")
 
@@ -439,27 +449,33 @@ with tab_bill:
         if bill["kwtbb_charge"] > 0:
             rows.append({"Charge Component": "KWTBB Levy  (1.6% × energy charges)",
                          "Amount (RM)": f"{bill['kwtbb_charge']:,.2f}"})
+        if bill["pf_surcharge"] > 0:
+            rows.append({"Charge Component":
+                         f"PF Surcharge  ({bill['pf_surcharge_pct']:.1f}% × energy + MD + KWTBB)"
+                         f"  [avg PF {avg_pf_val:.4f}]",
+                         "Amount (RM)": f"{bill['pf_surcharge']:,.2f}"})
         if bill["service_tax"] > 0:
-            rows.append({"Charge Component": "Service Tax  (6% × energy + MD + KWTBB)",
+            st_base = "energy + MD + KWTBB + PF surcharge" if bill["pf_surcharge"] > 0 else "energy + MD + KWTBB"
+            rows.append({"Charge Component": f"Service Tax  (8% × {st_base})",
                          "Amount (RM)": f"{bill['service_tax']:,.2f}"})
 
         rows.append({"Charge Component": "─" * 48, "Amount (RM)": "─" * 14})
         rows.append({"Charge Component": "GROSS BILL TOTAL",
                      "Amount (RM)": f"{bill['total_bill']:,.2f}"})
 
+        if bill["minimum_charge_applied"]:
+            rows.append({"Charge Component": f"⚠️  Minimum monthly charge of RM {get_min_charge(selected):.2f} applied (gross bill floored here)",
+                         "Amount (RM)": ""})
+
         if has_export and nem:
             rows.append({"Charge Component": "─" * 48, "Amount (RM)": "─" * 14})
             rows.append({"Charge Component":
                          f"☀️ Solar NEM Credit  ({ex_kwh:,.1f} kWh × RM {nem['nem_rate_rm']:.3f}/kWh)"
-                         "  [applied after all charges]",
+                         "  [deducted after SST — from gross bill above]",
                          "Amount (RM)": f"− {nem['nem_credit_rm']:,.2f}"})
             rows.append({"Charge Component": "─" * 48, "Amount (RM)": "─" * 14})
             rows.append({"Charge Component": "NET BILL (after solar NEM credit)",
                          "Amount (RM)": f"{net_bill_amt:,.2f}"})
-
-        if bill["minimum_charge_applied"]:
-            rows.append({"Charge Component": f"⚠️  Minimum monthly charge of RM {get_min_charge(selected):.2f} applied",
-                         "Amount (RM)": ""})
 
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
@@ -478,6 +494,7 @@ with tab_bill:
                 ("Max Demand Charge", bill["md_charge"]),
                 ("ICPT",              bill["icpt_charge"]),
                 ("KWTBB Levy",        bill["kwtbb_charge"]),
+                ("PF Surcharge",      bill["pf_surcharge"]),
                 ("Service Tax",       bill["service_tax"]),
             ]
             if has_export and nem:
@@ -485,7 +502,7 @@ with tab_bill:
 
             labels = [l for l, v in pie_data if abs(v) > 0]
             values = [abs(v) for _, v in pie_data if abs(v) > 0]
-            colors = ["#003566","#0077b6","#00b4d8","#90e0ef","#caf0f8","#2d9e50"]
+            colors = ["#003566","#0077b6","#00b4d8","#90e0ef","#e63946","#caf0f8","#2d9e50"]
 
             fig_pie = go.Figure(go.Pie(
                 labels=labels, values=values, hole=0.42,
@@ -539,6 +556,7 @@ with tab_monthly:
                 max_demand_kw=float(row["max_demand_kw"]),
                 icpt_sen_per_kwh=icpt_sen,
                 apply_service_tax=use_st, apply_kwtbb=use_kb,
+                avg_pf=float(row["avg_pf"]),
             )
             ex  = float(row["export_kwh"])
             nem_m = compute_nem_credit(ex, nem_rate) if ex > 0 else {"nem_credit_rm": 0.0}
@@ -550,11 +568,13 @@ with tab_monthly:
                 "Peak kWh":            round(float(row["peak_kwh"]), 1),
                 "Off-Peak kWh":        round(float(row["offpeak_kwh"]), 1),
                 "Max Demand (kW)":     round(float(row["max_demand_kw"]), 1),
+                "Avg PF":              round(float(row["avg_pf"]), 4),
                 "Export kWh":          round(ex, 1),
                 "Energy Charge (RM)":  round(b["energy_charge"], 2),
                 "MD Charge (RM)":      round(b["md_charge"], 2),
                 "ICPT (RM)":           round(b["icpt_charge"], 2),
                 "KWTBB (RM)":          round(b["kwtbb_charge"], 2),
+                "PF Surcharge (RM)":   round(b["pf_surcharge"], 2),
                 "Service Tax (RM)":    round(b["service_tax"], 2),
                 "Gross Bill (RM)":     round(b["total_bill"], 2),
                 "NEM Credit (RM)":     round(nem_m["nem_credit_rm"], 2),
@@ -564,33 +584,56 @@ with tab_monthly:
         rdf = pd.DataFrame(records)
         st.dataframe(rdf, use_container_width=True, hide_index=True)
 
-        # Trend chart
-        fig_tr = go.Figure()
-        fig_tr.add_trace(go.Bar(
+        # ── Chart 1: Bill (RM) ────────────────────────────────────────────────
+        has_nem = has_solar_flag and rdf["NEM Credit (RM)"].sum() > 0
+        st.subheader("Monthly Bill  (RM)")
+        fig_bill = go.Figure()
+        fig_bill.add_trace(go.Bar(
             x=rdf["Month"], y=rdf["Gross Bill (RM)"],
             name="Gross Bill (RM)", marker_color="#0077b6",
             text=rdf["Gross Bill (RM)"].apply(lambda v: f"RM {v:,.0f}"),
-            textposition="outside", yaxis="y",
+            textposition="outside",
         ))
-        if has_solar_flag and rdf["NEM Credit (RM)"].sum() > 0:
-            fig_tr.add_trace(go.Bar(
+        if has_nem:
+            fig_bill.add_trace(go.Bar(
                 x=rdf["Month"], y=rdf["Net Bill (RM)"],
                 name="Net Bill after NEM (RM)", marker_color="#2d9e50",
-                yaxis="y",
+                text=rdf["Net Bill (RM)"].apply(lambda v: f"RM {v:,.0f}"),
+                textposition="outside",
             ))
-        fig_tr.add_trace(go.Scatter(
-            x=rdf["Month"], y=rdf["Total kWh"],
-            name="Total kWh", line=dict(color="#f4a261", width=2.5, dash="dot"),
-            mode="lines+markers", yaxis="y2",
-        ))
-        fig_tr.update_layout(
-            template="plotly_white", height=420, barmode="overlay",
-            yaxis=dict(title="Bill (RM)", showgrid=False),
-            yaxis2=dict(title="kWh", overlaying="y", side="right"),
+        fig_bill.update_layout(
+            template="plotly_white", height=380,
+            barmode="group",
+            yaxis=dict(title="Bill (RM)"),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-            hovermode="x unified", margin=dict(l=0,r=0,t=20,b=0),
+            hovermode="x unified", margin=dict(l=0, r=0, t=30, b=0),
         )
-        st.plotly_chart(fig_tr, use_container_width=True)
+        st.plotly_chart(fig_bill, use_container_width=True)
+
+        # ── Chart 2: Energy (kWh) ─────────────────────────────────────────────
+        st.subheader("Monthly Energy  (kWh)")
+        fig_kwh = go.Figure()
+        fig_kwh.add_trace(go.Bar(
+            x=rdf["Month"], y=rdf["Total kWh"],
+            name="Import kWh", marker_color="#0096c7",
+            text=rdf["Total kWh"].apply(lambda v: f"{v:,.0f}"),
+            textposition="outside",
+        ))
+        if has_nem:
+            fig_kwh.add_trace(go.Bar(
+                x=rdf["Month"], y=rdf["Export kWh"],
+                name="Export kWh (Solar)", marker_color="#f4a261",
+                text=rdf["Export kWh"].apply(lambda v: f"{v:,.0f}"),
+                textposition="outside",
+            ))
+        fig_kwh.update_layout(
+            template="plotly_white", height=340,
+            barmode="group",
+            yaxis=dict(title="kWh"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+            hovermode="x unified", margin=dict(l=0, r=0, t=30, b=0),
+        )
+        st.plotly_chart(fig_kwh, use_container_width=True)
 
         # Totals
         cs1, cs2, cs3, cs4 = st.columns(4)
@@ -613,7 +656,7 @@ with tab_monthly:
 # ══════════════════════════ TAB 4 — TARIFF REFERENCE ══════════════════════════
 with tab_ref:
     st.header("TNB Tariff Reference — Peninsular Malaysia")
-    st.caption("Official TNB tariff schedule, revised 2014 and updated 2022.")
+    st.caption("Official TNB tariff schedule, revised 2014 and updated July 2025. MD rate raised to RM 97.06/kW effective July 2025.")
 
     # Tariff A
     st.subheader("Tariff A — Domestic (Progressive / Tiered)")
@@ -624,17 +667,17 @@ with tab_ref:
         {"Block": "Next 300 kWh  (601 – 900)",  "Rate (RM/kWh)": 0.546},
         {"Block": "Remaining kWh (> 900)",       "Rate (RM/kWh)": 0.571},
     ]), use_container_width=True, hide_index=True)
-    st.caption("Min monthly: RM 3.00 · Service Tax: exempt · ICPT: generally exempt for domestic.")
+    st.caption("Min monthly: RM 3.00 · Service Tax: exempt (domestic) · ICPT: generally exempt for domestic.")
 
     # Commercial / Industrial
     st.subheader("Commercial & Industrial Tariffs")
     st.dataframe(pd.DataFrame([
-        {"Tariff":"B",  "Voltage":"LV  (< 1 kV)",      "Flat Rate":0.435, "Peak Rate":"—",  "Off-Peak":"—",   "MD Rate (RM/kW)":"—",    "Min Bill":"RM 7.20",   "ST":"6%","KWTBB":"1.6%"},
-        {"Tariff":"C1", "Voltage":"MV  (6.6–22 kV)",   "Flat Rate":0.365, "Peak Rate":"—",  "Off-Peak":"—",   "MD Rate (RM/kW)":"30.30","Min Bill":"RM 600.00", "ST":"6%","KWTBB":"1.6%"},
-        {"Tariff":"C2", "Voltage":"MV  (6.6–22 kV)",   "Flat Rate":"TOU", "Peak Rate":0.365,"Off-Peak":0.219, "MD Rate (RM/kW)":"30.30","Min Bill":"RM 600.00", "ST":"6%","KWTBB":"1.6%"},
-        {"Tariff":"D",  "Voltage":"HV  (33–132 kV)",   "Flat Rate":0.337, "Peak Rate":"—",  "Off-Peak":"—",   "MD Rate (RM/kW)":"29.60","Min Bill":"RM 600.00", "ST":"6%","KWTBB":"1.6%"},
-        {"Tariff":"E1", "Voltage":"HV  (33–132 kV)",   "Flat Rate":"TOU", "Peak Rate":0.337,"Off-Peak":0.202, "MD Rate (RM/kW)":"29.60","Min Bill":"RM 600.00", "ST":"6%","KWTBB":"1.6%"},
-        {"Tariff":"E2", "Voltage":"HV  (33–132 kV)",   "Flat Rate":"TOU", "Peak Rate":0.337,"Off-Peak":0.202, "MD Rate (RM/kW)":"29.60","Min Bill":"RM 600.00", "ST":"6%","KWTBB":"1.6%"},
+        {"Tariff":"B",  "Voltage":"LV  (< 1 kV)",      "Flat Rate":0.435, "Peak Rate":"—",  "Off-Peak":"—",   "MD Rate (RM/kW)":"—",    "Min Bill":"RM 7.20",   "ST":"8%","KWTBB":"1.6%"},
+        {"Tariff":"C1", "Voltage":"MV  (6.6–22 kV)",   "Flat Rate":0.365, "Peak Rate":"—",  "Off-Peak":"—",   "MD Rate (RM/kW)":"97.06","Min Bill":"RM 600.00", "ST":"8%","KWTBB":"1.6%"},
+        {"Tariff":"C2", "Voltage":"MV  (6.6–22 kV)",   "Flat Rate":"TOU", "Peak Rate":0.365,"Off-Peak":0.219, "MD Rate (RM/kW)":"97.06","Min Bill":"RM 600.00", "ST":"8%","KWTBB":"1.6%"},
+        {"Tariff":"D",  "Voltage":"HV  (33–132 kV)",   "Flat Rate":0.337, "Peak Rate":"—",  "Off-Peak":"—",   "MD Rate (RM/kW)":"97.06","Min Bill":"RM 600.00", "ST":"8%","KWTBB":"1.6%"},
+        {"Tariff":"E1", "Voltage":"HV  (33–132 kV)",   "Flat Rate":"TOU", "Peak Rate":0.337,"Off-Peak":0.202, "MD Rate (RM/kW)":"97.06","Min Bill":"RM 600.00", "ST":"8%","KWTBB":"1.6%"},
+        {"Tariff":"E2", "Voltage":"HV  (33–132 kV)",   "Flat Rate":"TOU", "Peak Rate":0.337,"Off-Peak":0.202, "MD Rate (RM/kW)":"97.06","Min Bill":"RM 600.00", "ST":"8%","KWTBB":"1.6%"},
     ]), use_container_width=True, hide_index=True)
 
     # Other charges
@@ -642,9 +685,10 @@ with tab_ref:
     st.dataframe(pd.DataFrame([
         {"Charge":"ICPT",                    "Detail":"Imbalance Cost Pass-Through. Quarterly surcharge(+) or rebate(−) per kWh set by Suruhanjaya Tenaga. Domestic (A) is generally exempt."},
         {"Charge":"KWTBB  (1.6%)",           "Detail":"Kumpulan Wang Tenaga Boleh Baharu. Renewable energy fund levy, charged on non-domestic energy charges."},
-        {"Charge":"Service Tax  (6%)",       "Detail":"Charged on (energy + MD + KWTBB) for Tariff B/C/D/E. Domestic (Tariff A) is fully exempt."},
+        {"Charge":"PF Surcharge  (1.5%/unit)","Detail":"Power Factor surcharge for Tariff C1/C2/D/E1/E2. Applied when average monthly PF < 0.85. Each 0.01 below 0.85 = 1 unit; surcharge = units × 1.5% × (energy + MD + KWTBB). Service Tax applies to this surcharge. PF computed using TNB meter method: total kWh / √(total kWh² + total kVARh²) for the billing month."},
+        {"Charge":"Service Tax  (8%)",       "Detail":"Charged on (energy + MD + KWTBB + PF surcharge) for Tariff B/C/D/E. Domestic (Tariff A) fully exempt. Rate raised from 6% to 8% in March 2024. ICPT and NEM credit are NOT in the SST base."},
         {"Charge":"Maximum Demand  (MD)",    "Detail":"Highest recorded 30-min average kW in the billing month × RM/kW rate. Applies to Tariff C1, C2, D, E1, E2."},
-        {"Charge":"Peak Hours  (TOU)",       "Detail":"08:00–22:00, Monday–Saturday. All other hours, Sundays & public holidays are Off-Peak."},
+        {"Charge":"Peak Hours  (TOU)",       "Detail":"08:00–22:00, Monday–Saturday, excluding Public Holidays. Off-Peak = 22:00–08:00 daily, all day Sunday, all day Public Holidays."},
         {"Charge":"Minimum Monthly Charge",  "Detail":"Enforced when the computed bill is below RM 3.00 (A), RM 7.20 (B), or RM 600.00 (C/D/E)."},
         {"Charge":"Solar NEM Credit",        "Detail":"Net Energy Metering buyback for solar export. Applied AFTER all tariff charges, ICPT, KWTBB, and Service Tax. Default: RM 0.31/kWh (TNB NEM 3.0)."},
     ]), use_container_width=True, hide_index=True)
@@ -652,9 +696,10 @@ with tab_ref:
     # Auto-detection rules
     st.subheader("Auto-Detection Rules (Voltage Proxy via Peak Demand)")
     st.dataframe(pd.DataFrame([
-        {"Peak Demand (kW)": "< 12 kW",        "Inferred Tariff": "A — Domestic",        "Voltage": "Low Voltage",    "Notes": "Residential evening-peak profile."},
-        {"Peak Demand (kW)": "12 – 25 kW",     "Inferred Tariff": "B — LV Commercial",   "Voltage": "Low Voltage",    "Notes": "Daytime-heavy or usage > 2,000 kWh/month."},
-        {"Peak Demand (kW)": "25 – 999 kW",    "Inferred Tariff": "C1 or C2",            "Voltage": "Medium Voltage", "Notes": "C2 suggested if off-peak fraction ≥ 35% or load factor ≥ 70%."},
-        {"Peak Demand (kW)": "1,000 – 4,999 kW","Inferred Tariff": "D — HV General",     "Voltage": "High Voltage",   "Notes": "Large industrial supply."},
-        {"Peak Demand (kW)": "≥ 5,000 kW",     "Inferred Tariff": "E1 / E2",             "Voltage": "High Voltage",   "Notes": "E2 if MD ≥ 1,500 kW and load factor ≥ 60%."},
+        {"Peak Demand (kW)": "< 25 kW  (residential pattern)",           "Inferred Tariff": "A — Domestic",              "Voltage": "Low Voltage",    "Notes": "Evening-peak load shape, avg monthly usage ≤ 2,000 kWh, daytime ratio ≤ 2.5×."},
+        {"Peak Demand (kW)": "< 25 kW  (commercial pattern)",            "Inferred Tariff": "B — LV Commercial",         "Voltage": "Low Voltage",    "Notes": "Daytime-heavy profile (business-hours ratio > 2.5×) or avg monthly usage > 2,000 kWh."},
+        {"Peak Demand (kW)": "25 – 999 kW",                              "Inferred Tariff": "C1 or C2",                  "Voltage": "Medium Voltage", "Notes": "C2 suggested if off-peak fraction ≥ 35% or load factor ≥ 70%."},
+        {"Peak Demand (kW)": "≥ 1,000 kW  (daytime-heavy)",             "Inferred Tariff": "D — HV General",            "Voltage": "High Voltage",   "Notes": "Flat-rate billing. Off-peak fraction < 35% and load factor < 70%."},
+        {"Peak Demand (kW)": "≥ 1,000 kW  (off-peak heavy or high LF)", "Inferred Tariff": "E1 — HV Peak/Off-Peak",     "Voltage": "High Voltage",   "Notes": "TOU billing beneficial. Off-peak fraction ≥ 35% or load factor ≥ 70%."},
+        {"Peak Demand (kW)": "≥ 1,500 kW  (off-peak heavy or high LF)", "Inferred Tariff": "E2 — HV TOU (MD ≥ 1500 kW)","Voltage": "High Voltage",  "Notes": "E2 incentive TOU rate. Same condition as E1 but peak demand ≥ 1,500 kW."},
     ]), use_container_width=True, hide_index=True)
